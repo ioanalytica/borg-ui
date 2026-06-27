@@ -2006,11 +2006,13 @@ def _reject_agent_repository_ssh_target(
     connection_id: Optional[int],
     execution_target: Optional[str],
 ) -> None:
-    if (
-        connection_id
-        or (path or "").strip().startswith("ssh://")
-        or (execution_target or "").strip().lower() == "ssh"
-    ):
+    # An agent reaches its repository over its OWN SSH setup (its mounted key /
+    # known_hosts), so ssh:// repository paths are fully supported: the agent
+    # backup/operation payload already carries the path + remote_path and the
+    # agent runs `borg ... --remote-path` itself. Only a server-managed
+    # `connection_id` stays unsupported — it points at an `ssh_connections` row
+    # that only the Borg UI server can use, not the agent.
+    if connection_id:
         raise HTTPException(
             status_code=400,
             detail={"key": "backend.errors.repo.agentRepositorySshUnsupported"},
