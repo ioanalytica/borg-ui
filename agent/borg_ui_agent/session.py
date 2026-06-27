@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import socket as socket_module
+import threading
 import time
 from collections.abc import Callable
 from typing import Any, Optional
@@ -58,12 +59,20 @@ def _open_tcp_connection(host: str, port: int, timeout_seconds: float) -> None:
 
 
 class SessionCommandClient:
-    def __init__(self, socket, *, command_id: str, job_id: Optional[int]):
+    def __init__(
+        self,
+        socket,
+        *,
+        command_id: str,
+        job_id: Optional[int],
+        send_lock: Optional[threading.Lock] = None,
+    ):
         self.socket = socket
         self.command_id = command_id
         self.job_id = job_id
         self.finished = False
         self.started = False
+        self._send_lock = send_lock or threading.Lock()
 
     def start_job(self, job_id: int) -> dict[str, Any]:
         self.started = True
@@ -142,14 +151,9 @@ class SessionCommandClient:
         self._send({"type": "command_error", "job_id": self.job_id, "error": error})
 
     def _send(self, payload: dict[str, Any]) -> None:
-        self.socket.send(
-            json.dumps(
-                {
-                    "command_id": self.command_id,
-                    **payload,
-                }
-            )
-        )
+        message = json.dumps({"command_id": self.command_id, **payload})
+        with self._send_lock:
+            self.socket.send(message)
 
     def _ensure_started(self, job_id: int) -> None:
         if not self.started:
@@ -169,6 +173,9 @@ class AgentSessionRuntime:
         self.connect = connect or _default_connect
         self.sleep = sleep
         self.timeout_seconds = timeout_seconds
+        self._send_lock = threading.Lock()
+        self._registry_lock = threading.Lock()
+        self._cancel_events: dict[int, threading.Event] = {}
 
     def run_forever(
         self,
@@ -201,6 +208,8 @@ class AgentSessionRuntime:
             header=[f"{AGENT_AUTH_HEADER}: Bearer {self.config.agent_token}"],
             timeout=self.timeout_seconds,
         )
+        workers: list[threading.Thread] = []
+        clean_exit = False
         try:
             self._send_hello(socket)
             handled = 0
@@ -208,15 +217,40 @@ class AgentSessionRuntime:
                 try:
                     raw_message = socket.recv()
                 except (TimeoutError, WebSocketTimeoutException):
-                    ping = getattr(socket, "ping", None)
-                    if callable(ping):
-                        ping()
+                    # Idle keep-alive ping. The key property of this loop is that
+                    # it stays in recv() *even while a job runs in a worker
+                    # thread*, so websocket-client keeps auto-ponging the server's
+                    # pings and the session survives long backups/checks.
+                    with self._send_lock:
+                        ping = getattr(socket, "ping", None)
+                        if callable(ping):
+                            ping()
                     continue
                 message = json.loads(raw_message)
                 if isinstance(message, dict) and message.get("type") == "command":
-                    self._handle_command(socket, message)
+                    worker = threading.Thread(
+                        target=self._handle_command,
+                        args=(socket, message),
+                        daemon=True,
+                    )
+                    worker.start()
+                    workers.append(worker)
+                    workers = [w for w in workers if w.is_alive()]
                 handled += 1
+            clean_exit = True
         finally:
+            if clean_exit:
+                # Orderly shutdown (e.g. max_messages reached): let in-flight jobs
+                # finish so their final results are sent before the socket closes.
+                for worker in workers:
+                    worker.join()
+            else:
+                # The session dropped while a job may still be running. Do NOT
+                # block reconnection on it — signal cancellation so the job stops
+                # writing to a dead socket, and let run_forever reconnect at once.
+                with self._registry_lock:
+                    for event in self._cancel_events.values():
+                        event.set()
             try:
                 socket.close()
             except Exception:
@@ -225,19 +259,19 @@ class AgentSessionRuntime:
     def _send_hello(self, socket) -> None:
         machine = detect_platform()
         borg_versions = [binary.to_api_payload() for binary in detect_borg_binaries()]
-        socket.send(
-            json.dumps(
-                {
-                    "type": "hello",
-                    "agent_id": self.config.agent_id,
-                    "hostname": machine["hostname"],
-                    "agent_version": __version__,
-                    "borg_versions": borg_versions,
-                    "capabilities": get_capabilities(),
-                    "running_job_ids": [],
-                }
-            )
+        message = json.dumps(
+            {
+                "type": "hello",
+                "agent_id": self.config.agent_id,
+                "hostname": machine["hostname"],
+                "agent_version": __version__,
+                "borg_versions": borg_versions,
+                "capabilities": get_capabilities(),
+                "running_job_ids": [],
+            }
         )
+        with self._send_lock:
+            socket.send(message)
 
     def _handle_command(self, socket, message: dict[str, Any]) -> None:
         command_id = str(message.get("command_id") or "")
@@ -247,17 +281,22 @@ class AgentSessionRuntime:
         payload = (
             message.get("payload") if isinstance(message.get("payload"), dict) else {}
         )
-        client = SessionCommandClient(socket, command_id=command_id, job_id=job_id)
-
-        socket.send(
-            json.dumps(
-                {
-                    "type": "command_ack",
-                    "command_id": command_id,
-                    "job_id": job_id,
-                }
-            )
+        client = SessionCommandClient(
+            socket,
+            command_id=command_id,
+            job_id=job_id,
+            send_lock=self._send_lock,
         )
+
+        ack = json.dumps(
+            {
+                "type": "command_ack",
+                "command_id": command_id,
+                "job_id": job_id,
+            }
+        )
+        with self._send_lock:
+            socket.send(ack)
 
         if command == "filesystem.browse":
             self._handle_filesystem_browse(client, payload)
@@ -268,10 +307,11 @@ class AgentSessionRuntime:
             return
 
         if command == "cancel":
-            if job_id is None:
-                client.send_result({"success": True})
-            else:
-                client.cancel_job(job_id)
+            # Signal the worker running this job so it actually stops; the worker
+            # emits the job_canceled frame itself as it unwinds.
+            if job_id is not None:
+                self._signal_cancel(job_id)
+            client.send_result({"success": True})
             return
 
         handler = get_job_handler(command)
@@ -282,16 +322,19 @@ class AgentSessionRuntime:
             )
             return
 
+        cancel_event = self._register_cancel(job_id)
         try:
             result = handler(
                 {"id": job_id, "type": command, "payload": payload},
                 client,
-                should_cancel=lambda: False,
+                should_cancel=cancel_event.is_set,
             )
         except Exception as exc:
             logger.exception("Agent session command failed", extra={"command": command})
             client.send_error(f"{command} failed: {exc}")
             return
+        finally:
+            self._unregister_cancel(job_id)
 
         if client.finished:
             return
@@ -308,6 +351,22 @@ class AgentSessionRuntime:
                 error_message=message_text,
                 return_code=return_code,
             )
+
+    def _register_cancel(self, job_id: int) -> threading.Event:
+        event = threading.Event()
+        with self._registry_lock:
+            self._cancel_events[job_id] = event
+        return event
+
+    def _signal_cancel(self, job_id: int) -> None:
+        with self._registry_lock:
+            event = self._cancel_events.get(job_id)
+        if event is not None:
+            event.set()
+
+    def _unregister_cancel(self, job_id: int) -> None:
+        with self._registry_lock:
+            self._cancel_events.pop(job_id, None)
 
     def _handle_filesystem_browse(
         self, client: SessionCommandClient, payload: dict[str, Any]
