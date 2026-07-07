@@ -277,6 +277,28 @@ def is_lock_error(exit_code: int = None, msgid: str = None) -> bool:
     return False
 
 
+# Borg emits these on stderr when it cannot get the repository lock. Needed
+# because Borg 1.x uses legacy exit codes by default (any error -> rc 2, not
+# the granular 70-75), so exit-code detection alone misses locks unless
+# BORG_EXIT_CODES=modern is set. Kept deliberately specific to avoid false
+# positives from unrelated output.
+_LOCK_STDERR_MARKERS = (
+    "acquire the lock",  # borg1: "Failed to create/acquire the lock ... (timeout)."
+    "lock.exclusive",
+    "locktimeout",
+    "lockfailed",
+    "objectnotfound: locks/",  # borg2: remote lock object over rclone/sftp
+)
+
+
+def stderr_indicates_lock(stderr: str | None) -> bool:
+    """Return True if borg stderr text indicates a repository lock failure."""
+    if not stderr:
+        return False
+    haystack = stderr.lower()
+    return any(marker in haystack for marker in _LOCK_STDERR_MARKERS)
+
+
 import json as _json
 
 # Maps Borg message IDs to backend.errors.borg locale keys

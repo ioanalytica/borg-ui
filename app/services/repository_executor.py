@@ -9,7 +9,14 @@ from typing import Any, Callable, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.database.models import AgentJob, AgentMachine, BackupJob, Repository
+from app.core.borg_errors import is_lock_error, stderr_indicates_lock
+from app.database.models import (
+    AgentJob,
+    AgentJobLog,
+    AgentMachine,
+    BackupJob,
+    Repository,
+)
 from app.services.job_admission import (
     OPERATION_BACKUP,
     ensure_repository_admission,
@@ -345,10 +352,33 @@ def queue_agent_repository_operation_job(
     return agent_job
 
 
+def _agent_job_stderr(db: Session, agent_job_id: int) -> str:
+    """Concatenate the stderr the agent streamed for a job, for lock detection.
+
+    Deliberately scoped to the stderr stream: the read operations
+    (list/info/browse/download) run borg with stderr kept separate, so borg's
+    "Failed to create/acquire the lock" message lands here cleanly. The
+    streaming ops (prune/compact/init/rclone) and restore merge stderr into
+    stdout; we do not try to classify their output, and their failures surface
+    through their normal error path.
+    """
+    rows = (
+        db.query(AgentJobLog.message)
+        .filter(
+            AgentJobLog.agent_job_id == agent_job_id,
+            AgentJobLog.stream == "stderr",
+        )
+        .order_by(AgentJobLog.sequence.asc(), AgentJobLog.id.asc())
+        .all()
+    )
+    return "\n".join(message for (message,) in rows if message)
+
+
 async def wait_for_agent_repository_operation_job(
     db: Session,
     agent_job_id: int,
     *,
+    repository_id: Optional[int] = None,
     timeout_seconds: int = 15,
     poll_interval_seconds: float = 0.25,
 ) -> dict[str, Any]:
@@ -364,6 +394,37 @@ async def wait_for_agent_repository_operation_job(
         if agent_job.status == "completed":
             return agent_job.result or {}
         if agent_job.status in TERMINAL_AGENT_STATUSES:
+            # A borg lock timeout (e.g. an external backup on another host holds
+            # the repository lock) surfaces here as a generic terminal failure.
+            # Classify it so the UI can show the "repository locked / break lock"
+            # flow instead of an empty repository — matching the server-side
+            # (non-agent) path.
+            #
+            # Detection is both exit-code and stderr based: Borg 1.x defaults to
+            # legacy exit codes where a lock failure is rc 2 (not 70-75), so the
+            # exit code alone is not enough. The agent streams borg's stderr into
+            # the job logs, so we also scan that for borg's lock message.
+            result = agent_job.result if isinstance(agent_job.result, dict) else {}
+            if is_lock_error(
+                exit_code=result.get("return_code")
+            ) or stderr_indicates_lock(_agent_job_stderr(db, agent_job.id)):
+                # "message" drives the dedicated LockErrorDialog (matched on the
+                # 423 status); "key" lets callers that just surface a backend
+                # error toast (e.g. file download) render the lock message too.
+                raise HTTPException(
+                    status_code=423,
+                    detail={
+                        "error": "repository_locked",
+                        "key": "backend.errors.repo.repositoryLocked",
+                        "message": "backend.errors.repo.repositoryLocked",
+                        "suggestion": (
+                            "If no backup is currently running, this is likely a "
+                            "stale lock. You can break the lock to continue."
+                        ),
+                        "repository_id": repository_id,
+                        "can_break_lock": True,
+                    },
+                )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail={

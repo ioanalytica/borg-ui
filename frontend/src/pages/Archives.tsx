@@ -7,7 +7,7 @@ import { Folder } from 'lucide-react'
 import { repositoriesAPI, mountsAPI, restoreAPI } from '../services/api'
 import { useRepositoryStats } from '../hooks/useRepositoryStats'
 import { BorgApiClient } from '../services/borgApi'
-import { translateBackendKey } from '../utils/translateBackendKey'
+import { translateBackendKey, type BackendDetail } from '../utils/translateBackendKey'
 import { downloadArchiveFile } from '../utils/downloadArchiveFile'
 import RepositorySelectorCard from '../components/RepositorySelectorCard'
 import RepositoryStatsGrid from '../components/RepositoryStatsGrid'
@@ -129,6 +129,7 @@ const Archives: React.FC = () => {
 
   // Handle archives error
   React.useEffect(() => {
+    if (!archivesError) return
     const responseStatus = (archivesError as { response?: { status?: number } } | null)?.response
       ?.status
     if (responseStatus === 423 && selectedRepositoryId) {
@@ -137,8 +138,16 @@ const Archives: React.FC = () => {
         repositoryName: selectedRepository?.name || 'Unknown',
         borgVersion: getBorgVersion(selectedRepository),
       })
+      return
     }
-  }, [archivesError, selectedRepositoryId, selectedRepository])
+    // Any other failure (502/504/…) must not read as an empty repository —
+    // surface it so the user knows the listing failed rather than that there
+    // are no archives.
+    const detail = (
+      archivesError as { response?: { data?: { detail?: BackendDetail } } } | null
+    )?.response?.data?.detail
+    toast.error(translateBackendKey(detail) || t('archives.toasts.loadFailed'))
+  }, [archivesError, selectedRepositoryId, selectedRepository, t])
 
   // Get restore jobs
   const { data: restoreJobsData } = useQuery({
@@ -566,6 +575,15 @@ const Archives: React.FC = () => {
         archive={viewArchive}
         repository={selectedRepository ?? null}
         onClose={() => setViewArchive(null)}
+        onRepositoryLocked={() => {
+          if (selectedRepositoryId) {
+            setLockError({
+              repositoryId: selectedRepositoryId,
+              repositoryName: selectedRepository?.name || 'Unknown',
+              borgVersion: getBorgVersion(selectedRepository),
+            })
+          }
+        }}
         onDownloadFile={(archiveName, filePath, size) => {
           if (selectedRepository) {
             trackArchive(EventAction.DOWNLOAD, selectedRepository, {

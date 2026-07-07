@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { alpha, Box, Typography } from '@mui/material'
 import { ShieldCheck } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -19,6 +19,9 @@ interface ArchiveContentsDialogProps {
     filePath: string,
     size?: number | null
   ) => void | Promise<void>
+  /** Called when browsing fails because the repository is locked (HTTP 423),
+   *  so the parent (which owns the lock dialog) can surface it. */
+  onRepositoryLocked?: () => void
 }
 
 interface RawFileItem {
@@ -48,6 +51,7 @@ export default function ArchiveContentsDialog({
   repository,
   onClose,
   onDownloadFile,
+  onRepositoryLocked,
 }: ArchiveContentsDialogProps) {
   const { t } = useTranslation()
   const [currentPath, setCurrentPath] = useState('')
@@ -59,7 +63,11 @@ export default function ArchiveContentsDialog({
     }
   }, [open, archive])
 
-  const { data: archiveContents, isFetching } = useQuery({
+  const {
+    data: archiveContents,
+    isFetching,
+    error: contentsError,
+  } = useQuery({
     queryKey: ['archive-contents', repository?.id, archive?.name, currentPath],
     queryFn: async () => {
       if (!repository || !archive) {
@@ -69,7 +77,24 @@ export default function ArchiveContentsDialog({
     },
     enabled: !!archive && !!repository && open,
     staleTime: 5 * 60 * 1000,
+    retry: false,
   })
+
+  // A locked repository (e.g. a backup is running) fails the browse with 423.
+  // Report it to the parent so it can show the interactive lock dialog instead
+  // of leaving an empty archive on screen. The callback is held in a ref so the
+  // effect depends only on the (stable-per-error) query error — depending on the
+  // inline callback identity would re-fire on every parent re-render and, since
+  // the parent reacts by setting state, loop.
+  const onRepositoryLockedRef = useRef(onRepositoryLocked)
+  onRepositoryLockedRef.current = onRepositoryLocked
+
+  useEffect(() => {
+    const status = (contentsError as { response?: { status?: number } } | null)?.response?.status
+    if (status === 423) {
+      onRepositoryLockedRef.current?.()
+    }
+  }, [contentsError])
 
   const canaryDescription = t('archiveContents.managedCanaryDescription')
   const items = useMemo<StorageBrowserItem[] | null>(() => {

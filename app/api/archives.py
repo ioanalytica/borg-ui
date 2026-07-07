@@ -510,7 +510,9 @@ async def download_file_from_archive(
                     archive=archive,
                     file_path=file_path,
                 )
-                result = await wait_for_agent_repository_operation_job(db, agent_job.id)
+                result = await wait_for_agent_repository_operation_job(
+                    db, agent_job.id, repository_id=repo.id
+                )
                 return _write_agent_extracted_file(
                     result,
                     temp_dir=temp_dir,

@@ -635,6 +635,7 @@
     "mountSuccess": "Archivio montato con successo!\n\nIl mount è all'interno del container. Per accedere ai file, esegui:\n\n{{command}}",
     "toasts": {
       "deleteFailed": "Impossibile eliminare l'archivio",
+      "loadFailed": "Impossibile caricare gli archivi",
       "restoreFailed": "Impossibile avviare il ripristino",
       "notSelected": "Repository o archivio non selezionato"
     }

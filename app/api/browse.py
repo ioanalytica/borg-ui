@@ -78,7 +78,9 @@ async def _list_archive_contents(
             repository_id=repository.id,
             archive_name=archive_name,
         )
-        return await wait_for_agent_repository_operation_job(db, agent_job.id)
+        return await wait_for_agent_repository_operation_job(
+            db, agent_job.id, repository_id=repository.id
+        )
 
     env, temp_key_file = _build_repo_env(repository, db)
     try:

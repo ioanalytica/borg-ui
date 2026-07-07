@@ -871,6 +871,17 @@ export const BackupJobsTable = <T extends Job = Job>({
         archive={archiveView?.archive ?? null}
         repository={archiveView?.repository ?? null}
         onClose={() => setArchiveView(null)}
+        onRepositoryLocked={() => {
+          const repo = archiveView?.repository
+          if (!repo) return
+          setLockError({
+            repositoryId: repo.id,
+            repositoryName: repo.name,
+            borgVersion: repo.borg_version as 1 | 2 | undefined,
+            canBreakLock: false,
+            lockBreakingEnabled,
+          })
+        }}
         onDownloadFile={(archiveName, filePath, size) => {
           if (!archiveView?.repository) return
           return downloadArchiveFile(archiveView.repository, archiveName, filePath, {

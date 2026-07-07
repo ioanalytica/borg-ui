@@ -635,6 +635,7 @@
     "mountSuccess": "Archive mounted successfully!\n\nMount is inside the container. To access files, run:\n\n{{command}}",
     "toasts": {
       "deleteFailed": "Failed to delete archive",
+      "loadFailed": "Failed to load archives",
       "restoreFailed": "Failed to start restore",
       "notSelected": "Repository or archive not selected"
     }

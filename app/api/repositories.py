@@ -5855,7 +5855,9 @@ async def list_repository_archives(
                 job_kind="repository.list_archives",
             )
             await dispatch_agent_job_best_effort(db, agent_job, repository_id=repo_id)
-            result = await wait_for_agent_repository_operation_job(db, agent_job.id)
+            result = await wait_for_agent_repository_operation_job(
+                db, agent_job.id, repository_id=repo_id
+            )
             archives_data = _parse_agent_json_result(result)
             archives = archives_data.get("archives", [])
             archives = enrich_archives_with_backup_metadata(archives, repository, db)
@@ -5943,7 +5945,9 @@ async def get_repository_info(
                 job_kind="repository.info",
             )
             await dispatch_agent_job_best_effort(db, agent_job, repository_id=repo_id)
-            result = await wait_for_agent_repository_operation_job(db, agent_job.id)
+            result = await wait_for_agent_repository_operation_job(
+                db, agent_job.id, repository_id=repo_id
+            )
             info_data = _parse_agent_json_result(result)
             logger.info(
                 "Agent repository info retrieved successfully",

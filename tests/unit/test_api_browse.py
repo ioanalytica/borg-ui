@@ -470,7 +470,9 @@ class TestBrowseArchiveBehavior:
             repository_id=repo.id,
             archive_name="archive-1",
         )
-        wait_for_agent.assert_awaited_once_with(test_db, agent_job.id)
+        wait_for_agent.assert_awaited_once_with(
+            test_db, agent_job.id, repository_id=repo.id
+        )
         list_local.assert_not_awaited()
 
     @pytest.mark.asyncio
