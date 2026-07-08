@@ -3844,7 +3844,8 @@
       "clearAll": "Alle löschen",
       "selectDirTooltip": "Verzeichnis und alle Inhalte auswählen",
       "helpText": "Klicke auf Dateien, um sie auszuwählen, oder auf Ordner, um zu navigieren. Verwende das Kontrollkästchen neben Ordnern, um ganze Verzeichnisse auszuwählen.",
-      "failedToLoadContents": "Archivinhalt konnte nicht geladen werden"
+      "failedToLoadContents": "Archivinhalt konnte nicht geladen werden",
+      "loadContentsTimeout": "Lädt noch — dieses Archiv dauert länger als erwartet. Bitte in einem Moment erneut versuchen."
     },
     "restorePath": {
       "title": "Wiederherstellungsort wählen",

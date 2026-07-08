@@ -3844,7 +3844,8 @@
       "clearAll": "Clear all",
       "selectDirTooltip": "Select directory and all contents",
       "helpText": "Click files to select them, or click folders to navigate. Use the checkbox next to folders to select entire directories.",
-      "failedToLoadContents": "Failed to load archive contents"
+      "failedToLoadContents": "Failed to load archive contents",
+      "loadContentsTimeout": "Still loading — this archive is taking longer than expected. Try again in a moment."
     },
     "restorePath": {
       "title": "Choose restore location",

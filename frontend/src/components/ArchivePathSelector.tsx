@@ -43,6 +43,10 @@ interface ArchiveItem {
 
 const RESTORE_CANARY_MANAGED_TYPE = 'restore_canary'
 
+// Give up polling a stuck agent listing after this long and surface a timeout,
+// rather than hammering the server every 1.5s forever while the dialog stays open.
+const BROWSE_POLL_TIMEOUT_MS = 10 * 60 * 1000
+
 function isRestoreCanaryPath(path?: string) {
   const normalized = (path || '').replace(/^\/+/, '').replace(/\/+$/, '')
   return normalized === '.borg-ui' || normalized.startsWith('.borg-ui/')
@@ -96,11 +100,17 @@ export default function ArchivePathSelector({
       try {
         const client = new BorgApiClient(repository)
         // Agent listings are asynchronous: a 202 means the job is still running,
-        // so poll with the returned id until it completes.
+        // so poll with the returned id until it completes — but give up after
+        // BROWSE_POLL_TIMEOUT_MS so a wedged job doesn't poll the server forever.
+        const deadline = Date.now() + BROWSE_POLL_TIMEOUT_MS
         let response = await client.getArchiveContents(archive.id, archive.name, currentPath)
         let jobId: number | undefined
         while (response.status === 202) {
           if (cancelled) return
+          if (Date.now() > deadline) {
+            setError(t('wizard.restoreFiles.loadContentsTimeout'))
+            return
+          }
           setAwaitingAgent(true)
           jobId = response.data?.jobId ?? jobId
           await new Promise((resolve) => setTimeout(resolve, 1500))
