@@ -4085,6 +4085,7 @@
   "archiveContents": {
     "title": "Archivinhalt",
     "loading": "Lädt Archivinhalt...",
+    "slowLoadingHint": "Dieses Archiv ist groß, daher dauert das Auflisten der Dateien etwas länger. Einen Moment — das passiert nur beim ersten Mal, danach ist es zwischengespeichert.",
     "emptyDirectory": "Dieses Verzeichnis ist leer",
     "emptyArchive": "Dieses Archiv ist leer",
     "emptyArchiveDesc": "In diesem Archiv wurden keine Dateien gesichert. Dies kann passieren, wenn das Quellverzeichnis während der Sicherung leer oder nicht zugänglich war.",

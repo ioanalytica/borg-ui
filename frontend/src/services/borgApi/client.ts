@@ -132,15 +132,17 @@ export class BorgApiClient {
     })
   }
 
-  getArchiveContents(archiveId: string, archiveName: string, path = '') {
+  getArchiveContents(archiveId: string, archiveName: string, path = '', jobId?: number) {
     if (this.v === '/v2') {
       return httpClient.get(`/v2/archives/${archiveId}/contents`, {
         params: { repository: this.repoId, path },
       })
     }
-    // v1: use the browse endpoint (cached, path-filtered) — needs archive NAME not hex ID
+    // v1: use the browse endpoint (cached, path-filtered) — needs archive NAME not hex ID.
+    // Agent-backed archives are listed asynchronously: the first call may return
+    // 202 + a jobId, which the caller passes back here to poll the running job.
     return httpClient.get(`/browse/${this.repoId}/${archiveName}`, {
-      params: { path },
+      params: { path, ...(jobId != null ? { job_id: jobId } : {}) },
     })
   }
 
