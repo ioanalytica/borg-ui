@@ -1449,6 +1449,11 @@ class BackupPlanExecutionService:
                 _finish("failed", message, None, None, None)
                 return False, f"Plan {hook_type} agent script '{agent_script_name}': {message}"
 
+            # Link the execution to the agent job so the log endpoint can stream
+            # the agent's live output (agent_job_logs) while the hook runs.
+            execution.agent_job_id = agent_job.id
+            db.commit()
+
             await dispatch_agent_job_best_effort(db, agent_job)
 
             timeout_seconds = float(custom_timeout) if custom_timeout else None
