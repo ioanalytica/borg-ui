@@ -1,6 +1,7 @@
 import {
   alpha,
   Box,
+  Collapse,
   IconButton,
   Stack,
   Table,
@@ -12,11 +13,12 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material'
-import { Ban, Eye, RotateCcw } from 'lucide-react'
+import { Ban, ChevronDown, ChevronRight, Eye, RotateCcw } from 'lucide-react'
 import type { TFunction } from 'i18next'
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 
 import type { BackupPlanRunLogJob } from '../../../components/BackupPlanRunsPanel'
+import { PlanRunScriptsSection } from '../../../components/PlanRunScripts'
 import RetryJobDialog from '../../../components/RetryJobDialog'
 import {
   getBackupPlanRunRetryDisabledReason,
@@ -53,6 +55,14 @@ export function PlanRunsHistoryTable({
   t,
 }: PlanRunsHistoryTableProps) {
   const [retryRun, setRetryRun] = useState<BackupPlanRun | null>(null)
+  const [expandedRuns, setExpandedRuns] = useState<Set<number>>(new Set())
+  const toggleExpanded = (runId: number) =>
+    setExpandedRuns((prev) => {
+      const next = new Set(prev)
+      if (next.has(runId)) next.delete(runId)
+      else next.add(runId)
+      return next
+    })
   const formatStatusLabel = (status?: string) =>
     status
       ? t(`backupPlans.statuses.${status}`, { defaultValue: formatRunStatus(status) })
@@ -104,6 +114,8 @@ export function PlanRunsHistoryTable({
               const startedAt = run.started_at || run.created_at
               const logJob = findFirstLogJobForRun(run)
               const active = isActiveRun(run.status)
+              const scriptCount = run.script_executions?.length ?? 0
+              const expanded = expandedRuns.has(run.id)
               const retryDisabledReason = getBackupPlanRunRetryDisabledReason(run, t, {
                 canRetry: canRetryRun(run),
                 hasActiveRunForPlan: hasActiveRunForPlan(run),
@@ -114,7 +126,8 @@ export function PlanRunsHistoryTable({
                   : retryDisabledReason || t('backupPlans.runsPanel.retryTooltips.ready')
 
               return (
-                <TableRow key={run.id} hover>
+                <Fragment key={run.id}>
+                <TableRow hover sx={expanded ? { '& > td': { borderBottom: 'unset' } } : undefined}>
                   <TableCell
                     sx={{
                       fontFamily: '"JetBrains Mono","Fira Code",ui-monospace,monospace',
@@ -122,7 +135,23 @@ export function PlanRunsHistoryTable({
                       color: 'text.secondary',
                     }}
                   >
-                    #{run.id}
+                    <Stack direction="row" spacing={0.25} alignItems="center">
+                      {scriptCount > 0 ? (
+                        <IconButton
+                          size="small"
+                          onClick={() => toggleExpanded(run.id)}
+                          aria-label={t('backupPlans.runsTable.toggleScripts', {
+                            defaultValue: 'Show scripts',
+                          })}
+                          sx={{ width: 22, height: 22, color: 'text.secondary' }}
+                        >
+                          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </IconButton>
+                      ) : (
+                        <Box sx={{ width: 22, flexShrink: 0 }} />
+                      )}
+                      <span>#{run.id}</span>
+                    </Stack>
                   </TableCell>
                   <TableCell>
                     {startedAt ? (
@@ -251,6 +280,18 @@ export function PlanRunsHistoryTable({
                     </Stack>
                   </TableCell>
                 </TableRow>
+                {scriptCount > 0 && (
+                  <TableRow>
+                    <TableCell colSpan={5} sx={{ py: 0, border: 0 }}>
+                      <Collapse in={expanded} unmountOnExit>
+                        <Box sx={{ py: 1.5, px: 1 }}>
+                          <PlanRunScriptsSection run={run} onViewLogs={onViewLogs} />
+                        </Box>
+                      </Collapse>
+                    </TableCell>
+                  </TableRow>
+                )}
+                </Fragment>
               )
             })}
           </TableBody>

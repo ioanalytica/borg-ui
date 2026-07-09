@@ -33,7 +33,6 @@ import type {
   BackupPlan,
   BackupPlanRun,
   BackupPlanRunRepository,
-  BackupPlanScriptExecution,
 } from '../types'
 import {
   formatBytes as formatBytesUtil,
@@ -45,6 +44,9 @@ import {
   getBackupPlanRunRetryDisabledReason,
   shouldShowBackupPlanRunRetryAction,
 } from './backupPlanRunRetry'
+import { PlanRunScriptsSection, type BackupPlanRunLogJob } from './PlanRunScripts'
+
+export type { BackupPlanRunLogJob } from './PlanRunScripts'
 
 function isActiveRun(status?: string): boolean {
   return status === 'pending' || status === 'running'
@@ -94,21 +96,6 @@ function getTransportLabel(
   return null
 }
 
-export type BackupPlanRunLogJob =
-  | BackupJob
-  | {
-      id: number
-      status: string
-      type: 'script_execution'
-      has_logs?: boolean
-    }
-
-function canViewScriptLogs(execution: BackupPlanScriptExecution): boolean {
-  return (
-    execution.status !== 'pending' && Boolean(execution.has_logs || execution.status === 'running')
-  )
-}
-
 function getRepositoryLabel(runRepository: BackupPlanRunRepository): string {
   return runRepository.repository?.name || runRepository.backup_job?.repository || 'Repository'
 }
@@ -131,7 +118,11 @@ function findPlan(run: BackupPlanRun, plans: BackupPlan[]): BackupPlan | null {
 }
 
 function findFirstLogJob(run: BackupPlanRun): BackupPlanRunLogJob | null {
-  const scriptExecution = run.script_executions?.find(canViewScriptLogs)
+  const scriptExecution = run.script_executions?.find(
+    (execution) =>
+      execution.status !== 'pending' &&
+      Boolean(execution.has_logs || execution.status === 'running')
+  )
   if (scriptExecution) {
     return {
       id: scriptExecution.id,
@@ -319,94 +310,6 @@ function RepositoryRunRow({
   )
 }
 
-function ScriptExecutionRow({
-  execution,
-  onViewLogs,
-}: {
-  execution: BackupPlanScriptExecution
-  onViewLogs: (job: BackupPlanRunLogJob) => void
-}) {
-  const { t } = useTranslation()
-  const hookLabel =
-    execution.hook_type === 'pre-backup'
-      ? t('backupPlans.runsDialog.prePlanScript')
-      : execution.hook_type === 'post-backup'
-        ? t('backupPlans.runsDialog.postPlanScript')
-        : execution.hook_type || t('backupPlans.runsDialog.planScript')
-  const statusLabel = t(`backupPlans.statuses.${execution.status}`, {
-    defaultValue: formatRunStatus(execution.status),
-  })
-
-  return (
-    <Box
-      sx={{
-        border: 1,
-        borderColor: 'divider',
-        borderRadius: 1,
-        p: 1.5,
-        bgcolor: 'background.paper',
-      }}
-    >
-      <Stack
-        direction={{ xs: 'column', sm: 'row' }}
-        spacing={1}
-        alignItems={{ xs: 'flex-start', sm: 'center' }}
-        justifyContent="space-between"
-      >
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
-          <Box sx={{ color: 'text.secondary', display: 'flex', flexShrink: 0 }}>
-            <FileText size={16} />
-          </Box>
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="subtitle2" noWrap>
-              {hookLabel}: {execution.script_name}
-            </Typography>
-            <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
-              {execution.exit_code !== null && execution.exit_code !== undefined && (
-                <Typography variant="caption" color="text.secondary">
-                  {t('backupPlans.runsDialog.exitCode', { code: execution.exit_code })}
-                </Typography>
-              )}
-              {execution.execution_time !== null && execution.execution_time !== undefined && (
-                <Typography variant="caption" color="text.secondary">
-                  {t('backupPlans.runsDialog.scriptDuration', {
-                    seconds: execution.execution_time.toFixed(2),
-                  })}
-                </Typography>
-              )}
-            </Stack>
-          </Box>
-        </Stack>
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Chip size="small" label={statusLabel} color={runStatusColor(execution.status)} />
-          {canViewScriptLogs(execution) && (
-            <Button
-              size="small"
-              variant="text"
-              startIcon={<Eye size={14} />}
-              onClick={() =>
-                onViewLogs({
-                  id: execution.id,
-                  status: execution.status,
-                  type: 'script_execution',
-                  has_logs: execution.has_logs,
-                })
-              }
-            >
-              {t('backupPlans.runsDialog.viewLogs')}
-            </Button>
-          )}
-        </Stack>
-      </Stack>
-      {execution.error_message && (
-        <Typography variant="caption" color="error" sx={{ mt: 1, display: 'block' }}>
-          {execution.error_message}
-        </Typography>
-      )}
-    </Box>
-  )
-}
-
 function InlineMetric({
   icon,
   label,
@@ -542,20 +445,7 @@ export function BackupPlanRunCard({
             </Alert>
           )}
 
-          {run.script_executions && run.script_executions.length > 0 && (
-            <Stack spacing={1.25}>
-              <Typography variant="subtitle2" fontWeight={700}>
-                {t('backupPlans.runsDialog.planScripts')}
-              </Typography>
-              {run.script_executions.map((execution) => (
-                <ScriptExecutionRow
-                  key={execution.id}
-                  execution={execution}
-                  onViewLogs={onViewLogs}
-                />
-              ))}
-            </Stack>
-          )}
+          <PlanRunScriptsSection run={run} onViewLogs={onViewLogs} />
 
           {run.repositories.length === 0 ? (
             <Alert severity="info">{t('backupPlans.runsPanel.noRepositories')}</Alert>
