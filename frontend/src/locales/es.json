@@ -635,7 +635,6 @@
     "mountSuccess": "¡Archivo montado correctamente!\n\nEl montaje está dentro del contenedor. Para acceder a los archivos, ejecuta:\n\n{{command}}",
     "toasts": {
       "deleteFailed": "Error al eliminar el archivo",
-      "loadFailed": "Error al cargar los archivos",
       "restoreFailed": "Error al iniciar la restauración",
       "notSelected": "Repositorio o archivo no seleccionado"
     }
@@ -1230,6 +1229,10 @@
         "postBackupScripts": "Scripts posteriores a la copia",
         "addPreBackupScript": "Agregar script previo",
         "addPostBackupScript": "Agregar script posterior",
+        "addAgentScript": "Agregar script del agente",
+        "agentScriptBadge": "Agente",
+        "agentNoScripts": "El agente \"{{agent}}\" no publica scripts",
+        "agentOffline": "El agente \"{{agent}}\" está sin conexión — conéctalo para listar sus scripts",
         "noPreBackupScripts": "No hay scripts previos configurados.",
         "noPostBackupScripts": "No hay scripts posteriores configurados.",
         "onFailure": "Ante fallo",
@@ -3844,8 +3847,7 @@
       "clearAll": "Borrar todo",
       "selectDirTooltip": "Seleccionar directorio y todo su contenido",
       "helpText": "Haz clic en los archivos para seleccionarlos, o en las carpetas para navegar. Usa la casilla junto a las carpetas para seleccionar directorios completos.",
-      "failedToLoadContents": "Error al cargar el contenido del archivo",
-      "loadContentsTimeout": "Aún cargando — este archivo está tardando más de lo esperado. Inténtalo de nuevo en un momento."
+      "failedToLoadContents": "Error al cargar el contenido del archivo"
     },
     "restorePath": {
       "title": "Elegir ubicación de restauración",
@@ -4086,7 +4088,6 @@
   "archiveContents": {
     "title": "Contenido del archivo",
     "loading": "Cargando contenido del archivo...",
-    "slowLoadingHint": "Este archivo es grande, por lo que listar sus ficheros tarda un poco más. Un momento — esto solo ocurre la primera vez; después queda en caché.",
     "emptyDirectory": "Este directorio está vacío",
     "emptyArchive": "Este archivo está vacío",
     "emptyArchiveDesc": "No se respaldaron archivos en este archivo. Esto puede ocurrir si el directorio de origen estaba vacío o inaccesible durante la copia de seguridad.",
@@ -4278,7 +4279,6 @@
     "none": "Ninguno"
   },
   "repositoryWizard": {
-    "agentRepoUnknownWarning": "Este agente administrado no parece conocer su propio repositorio Borg. Si introduces aquí una URL ssh:// o sftp://, asegúrate de que este agente administrado pueda acceder realmente a ese repositorio.",
     "titleCreate": "Crear repositorio",
     "titleEdit": "Editar repositorio",
     "titleImport": "Importar repositorio",
@@ -4671,7 +4671,6 @@
         "permissionDeniedCreateDirectory": "Permiso denegado: no se puede crear el directorio en '{{path}}'. Para almacenar repositorios en su máquina anfitriona, use rutas que comiencen con '/local/'.",
         "permissionDeniedCreateParentDirectory": "Permiso denegado: no se puede crear el directorio padre '{{path}}'. Asegúrese de que el directorio exista en su máquina anfitriona con los permisos correctos.",
         "encryptedPassphraseRequired": "Se requiere contraseña para el modo de cifrado '{{mode}}'",
-        "agentPassphraseUnavailable": "Este agente administrado no proporcionó una BORG_PASSPHRASE, por lo que no puede abrir un repositorio cifrado. Define BORG_PASSPHRASE en el entorno del agente o introduce aquí una contraseña.",
         "encryptedPassphraseIncorrect": "El repositorio está cifrado pero la contraseña es incorrecta o falta. Proporcione la contraseña correcta.",
         "encryptionKeyfileNotRequired": "El repositorio usa cifrado '{{mode}}', que no requiere un archivo de clave. La carga del archivo de clave solo es necesaria para los modos de cifrado 'keyfile' o 'keyfile-blake2'.",
         "adminAccessRequired": "Se requiere acceso de administrador",
@@ -5005,6 +5004,8 @@
         "cannotDeleteTemplateScript": "No se pueden eliminar los scripts de plantilla",
         "scriptInUse": "No se puede eliminar el script: se usa en {{count}} {{places}}: {{repos}}",
         "hookTypeMustBe": "hook_type debe ser 'pre-backup' o 'post-backup'",
+        "hookScriptRequired": "Un hook debe referenciar un script de biblioteca o un script del agente, pero no ambos",
+        "invalidAgentScriptName": "Nombre de script del agente no válido (sin separadores de ruta ni '..', máx. 255 caracteres)",
         "scriptAlreadyAssigned": "El script '{{name}}' ya está asignado a este repositorio como {{hookType}}",
         "scriptAssignmentNotFound": "Asignación de script no encontrada"
       },

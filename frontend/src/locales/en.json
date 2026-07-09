@@ -635,7 +635,6 @@
     "mountSuccess": "Archive mounted successfully!\n\nMount is inside the container. To access files, run:\n\n{{command}}",
     "toasts": {
       "deleteFailed": "Failed to delete archive",
-      "loadFailed": "Failed to load archives",
       "restoreFailed": "Failed to start restore",
       "notSelected": "Repository or archive not selected"
     }
@@ -1230,6 +1229,10 @@
         "postBackupScripts": "Post-backup scripts",
         "addPreBackupScript": "Add pre-backup script",
         "addPostBackupScript": "Add post-backup script",
+        "addAgentScript": "Add agent script",
+        "agentScriptBadge": "Agent",
+        "agentNoScripts": "Agent \"{{agent}}\" publishes no scripts",
+        "agentOffline": "Agent \"{{agent}}\" is offline — connect it to list its scripts",
         "noPreBackupScripts": "No pre-backup scripts configured.",
         "noPostBackupScripts": "No post-backup scripts configured.",
         "onFailure": "On failure",
@@ -3844,8 +3847,7 @@
       "clearAll": "Clear all",
       "selectDirTooltip": "Select directory and all contents",
       "helpText": "Click files to select them, or click folders to navigate. Use the checkbox next to folders to select entire directories.",
-      "failedToLoadContents": "Failed to load archive contents",
-      "loadContentsTimeout": "Still loading — this archive is taking longer than expected. Try again in a moment."
+      "failedToLoadContents": "Failed to load archive contents"
     },
     "restorePath": {
       "title": "Choose restore location",
@@ -4086,7 +4088,6 @@
   "archiveContents": {
     "title": "Archive Contents",
     "loading": "Loading archive contents...",
-    "slowLoadingHint": "This archive is large, so listing its files takes a little longer. Hang tight — this only happens the first time; afterwards it's cached.",
     "emptyDirectory": "This directory is empty",
     "emptyArchive": "This archive is empty",
     "emptyArchiveDesc": "No files were backed up in this archive. This may happen if the source directory was empty or inaccessible during the backup.",
@@ -4278,7 +4279,6 @@
     "none": "None"
   },
   "repositoryWizard": {
-    "agentRepoUnknownWarning": "This managed agent doesn't seem to know its own Borg repository. If you enter an ssh:// or sftp:// URL here, make sure this managed agent can actually reach that repository.",
     "titleCreate": "Create Repository",
     "titleEdit": "Edit Repository",
     "titleImport": "Import Repository",
@@ -4671,7 +4671,6 @@
         "permissionDeniedCreateDirectory": "Permission denied: cannot create directory at '{{path}}'. To store repositories on your host machine, use paths starting with '/local/'.",
         "permissionDeniedCreateParentDirectory": "Permission denied: cannot create parent directory '{{path}}'. Please ensure the directory exists on your host machine with proper permissions.",
         "encryptedPassphraseRequired": "Passphrase is required for encryption mode '{{mode}}'",
-        "agentPassphraseUnavailable": "This managed agent didn't report a BORG_PASSPHRASE, so an encrypted repository can't be opened by it. Set BORG_PASSPHRASE in the agent's environment, or enter a passphrase here.",
         "encryptedPassphraseIncorrect": "Repository is encrypted but the passphrase is incorrect or missing. Please provide the correct passphrase.",
         "encryptionKeyfileNotRequired": "Repository uses '{{mode}}' encryption, which does not require a keyfile. Keyfile upload is only needed for 'keyfile' or 'keyfile-blake2' encryption modes.",
         "adminAccessRequired": "Admin access required",
@@ -5005,6 +5004,8 @@
         "cannotDeleteTemplateScript": "Cannot delete template scripts",
         "scriptInUse": "Cannot delete script: it is used in {{count}} {{places}}: {{repos}}",
         "hookTypeMustBe": "hook_type must be 'pre-backup' or 'post-backup'",
+        "hookScriptRequired": "A hook must reference either a library script or an agent script, but not both",
+        "invalidAgentScriptName": "Invalid agent script name (no path separators or '..', max 255 characters)",
         "scriptAlreadyAssigned": "Script '{{name}}' is already assigned to this repository as {{hookType}}",
         "scriptAssignmentNotFound": "Script assignment not found"
       },
