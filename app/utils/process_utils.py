@@ -14,11 +14,13 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.borg_router import BorgRouter
 from app.database.models import (
+    AgentJob,
     BackupPlanRun,
     BackupPlanRunRepository,
     CheckJob,
     CompactJob,
     BackupJob,
+    DeleteArchiveJob,
     PruneJob,
     RestoreCheckJob,
     RestoreJob,
@@ -285,6 +287,93 @@ def reconcile_stale_backup_maintenance(
             previous_maintenance_status=state,
             new_maintenance_status=backup_job.maintenance_status,
         )
+
+    if reaped:
+        db.commit()
+
+    return reaped
+
+
+# An agent maintenance job carries no backup_job_id, so a *_job is correlated to
+# its agent job via the payload's maintenance_job {kind, id}.
+_ACTIVE_AGENT_STATUSES = ("queued", "claimed", "cancel_requested", "running")
+_ORPHAN_MAINTENANCE_MODELS = (
+    ("prune", PruneJob),
+    ("compact", CompactJob),
+    ("check", CheckJob),
+    ("delete_archive", DeleteArchiveJob),
+)
+
+
+def _has_active_agent_job_for(
+    db: Session, maintenance_kind: str, maintenance_job_id: int
+) -> bool:
+    """True if a live agent job exists for this maintenance ``*_job``."""
+    active = (
+        db.query(AgentJob)
+        .filter(
+            AgentJob.job_type == "repository",
+            AgentJob.status.in_(_ACTIVE_AGENT_STATUSES),
+        )
+        .all()
+    )
+    for agent_job in active:
+        payload = agent_job.payload if isinstance(agent_job.payload, dict) else {}
+        maintenance_job = (payload.get("operation") or {}).get("maintenance_job") or {}
+        if (
+            maintenance_job.get("kind") == maintenance_kind
+            and maintenance_job.get("id") == maintenance_job_id
+        ):
+            return True
+    return False
+
+
+def reconcile_orphaned_maintenance_jobs(
+    db: Session,
+    *,
+    now: Optional[datetime] = None,
+    reap_after: timedelta = MAINTENANCE_RECONCILE_AFTER,
+) -> int:
+    """Fail maintenance ``*_jobs`` left 'pending' with no agent job to run them.
+
+    The ``*_job`` row (PruneJob/CompactJob/CheckJob/DeleteArchiveJob) is created
+    before its agent job is queued; if the queue fails (e.g. ``database is
+    locked``) no agent job exists, so the row stays 'pending' forever and blocks
+    the repository via admission control. Reap old pending rows that have no
+    active agent job.
+
+    Only 'pending' is reaped here: 'running' rows are covered by the existing
+    process-liveness reapers, and a server-side maintenance op runs in-process
+    without an agent job (so absence of an agent job does not imply orphaned for
+    a running row). The age guard bounds a legitimately just-created row.
+    """
+    now = _strip_tz(now or datetime.utcnow())
+    cutoff = now - reap_after
+
+    reaped = 0
+    for kind, model in _ORPHAN_MAINTENANCE_MODELS:
+        jobs = db.query(model).filter(model.status == "pending").all()
+        for job in jobs:
+            activity = job.created_at
+            if activity is not None and _strip_tz(activity) > cutoff:
+                continue  # too fresh; its agent job may be queued a moment later
+            if _has_active_agent_job_for(db, kind, job.id):
+                continue  # dispatched, waiting for the agent
+            job.status = "failed"
+            if hasattr(job, "error_message"):
+                job.error_message = (
+                    job.error_message
+                    or "orphaned: no agent job was queued for this maintenance"
+                )
+            if hasattr(job, "completed_at"):
+                job.completed_at = job.completed_at or now
+            reaped += 1
+            logger.info(
+                "Reaped orphaned pending maintenance job",
+                job_model=model.__name__,
+                job_id=job.id,
+                repository_id=getattr(job, "repository_id", None),
+            )
 
     if reaped:
         db.commit()
