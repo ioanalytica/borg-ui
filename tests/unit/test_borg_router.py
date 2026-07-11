@@ -162,6 +162,35 @@ async def test_run_agent_maintenance_translates_http_errors_for_background_flows
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_run_agent_maintenance_fails_the_job_when_queue_fails():
+    # If the agent job cannot even be queued (e.g. database is locked), the
+    # already-created maintenance *_job must be failed closed so it does not
+    # orphan and block the repo via admission.
+    repo = SimpleNamespace(borg_version=2, id=41, executor_type="agent")
+    fake_db = MagicMock()
+    fake_db.query.return_value.get.return_value = SimpleNamespace(id=41)
+    fake_db.query.return_value.first.return_value = None
+
+    with (
+        patch("app.database.database.SessionLocal", return_value=fake_db),
+        patch(
+            "app.services.repository_executor.queue_agent_repository_operation_job",
+            side_effect=RuntimeError("database is locked"),
+        ),
+        patch("app.core.borg_router._fail_orphaned_maintenance_job") as m_fail,
+        pytest.raises(RuntimeError),
+    ):
+        await BorgRouter(repo)._run_agent_maintenance(
+            job_kind="repository.prune",
+            maintenance_kind="prune",
+            maintenance_job_id=129,
+        )
+
+    m_fail.assert_called_once_with(fake_db, "prune", 129)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_compact_delegates_to_agent_when_managed():
     repo = SimpleNamespace(borg_version=2, id=41, executor_type="agent")
 
