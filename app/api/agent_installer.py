@@ -521,6 +521,36 @@ install_borg1() {
   install_borg_from_server "1" "${PINNED_BORG1_VERSION}" "${BORG1_LINK}"
 }
 
+# Borg 2 reaches rclone remotes by driving an rclone process, which borgstore
+# expects on PATH. It is a separate Go program that no Borg release bundles, so
+# rclone repositories fail at use time unless it is installed here. Installed
+# alongside Borg 2 rather than as an opt-in: a node that cannot reach a whole
+# class of repositories is a worse default than one extra package.
+install_rclone() {
+  local version
+
+  if ! command -v rclone >/dev/null 2>&1; then
+    apt-get install -y rclone
+  fi
+
+  if ! command -v rclone >/dev/null 2>&1; then
+    echo "Warning: rclone could not be installed; rclone: repositories will not work." >&2
+    return
+  fi
+
+  # borgstore requires 1.57.0 or newer. Older distributions ship less than that
+  # (Debian 11 has 1.53), which is worth saying now rather than at backup time.
+  version="$(rclone version 2>/dev/null | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  if [[ -n "${version}" ]] &&
+    ! printf '%s\n%s\n' "1.57.0" "${version}" | sort -V -C; then
+    echo "Warning: rclone ${version} is older than the 1.57.0 borgstore requires." >&2
+    echo "rclone: repositories will not work until it is updated, see rclone.org." >&2
+    return
+  fi
+
+  echo "Verified rclone: ${version:-unknown version}"
+}
+
 install_borg2() {
   if [[ "${BORG_SOURCE}" == "distro" ]]; then
     echo "No distribution ships Borg 2 yet; --borg-source distro cannot install it." >&2
@@ -528,6 +558,7 @@ install_borg2() {
   fi
 
   install_borg_from_server "2" "${PINNED_BORG2_VERSION}" "${BORG2_LINK}"
+  install_rclone
 }
 
 if [[ "${SKIP_BORG_INSTALL}" == "1" ]]; then
