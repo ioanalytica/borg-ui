@@ -15,6 +15,19 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
+# --- managed agent package: built in-image, served to enrolling nodes ---
+# A node installs the agent belonging to the server it enrolls against instead
+# of whatever the upstream default branch holds, which matters whenever a
+# deployment runs ahead of it. The agent is pure Python, so one py3-none-any
+# wheel covers every target platform.
+FROM python:3.12-slim AS agent-builder
+WORKDIR /agent-src
+COPY pyproject.toml ./
+COPY agent/ ./agent/
+# hadolint ignore=DL3013
+RUN pip install --no-cache-dir build && \
+    python -m build --wheel --outdir /agent-dist
+
 # Build stage for backend
 FROM python:3.10-slim AS backend-builder
 WORKDIR /app
@@ -112,6 +125,9 @@ COPY --from=backend-builder /usr/local/bin /usr/local/bin
 # Frontend assets built hermetically in the frontend-builder stage above (once
 # on the builder arch), so `docker build` alone is fully reproducible.
 COPY --from=frontend-builder /frontend/build ./app/static/
+
+# Agent wheel served at /agent/package/<filename> to enrolling nodes.
+COPY --from=agent-builder /agent-dist/ /opt/borg-ui/agent-dist/
 
 # Copy application code
 COPY app/ ./app/
