@@ -5,20 +5,30 @@ compiles from source and needs a build toolchain on the target machine. The
 static single-file binaries shipped with each release let a managed agent get
 the exact Borg version its server runs without one.
 
-The manifest is checked in rather than fetched at runtime so that the installer
-can verify what it downloaded against a value the server did not learn from the
-same place it got the file.
+The data lives in ``borg_binaries.json`` beside this module rather than in
+Python, because the agent image build reads the same file: the checksums are
+stated once and consumed by everything that needs them.
 
-Regenerate after a Borg version bump with::
+The manifest is checked in rather than fetched at runtime so that the
+installer can verify what it downloaded against a value the server did not
+learn from the same place it got the file.
 
-    python scripts/refresh_borg_binary_manifest.py 1.4.4 2.0.0b21
+To adopt a new Borg version, change the version in ``Dockerfile.runtime-base``
+and run::
+
+    python scripts/refresh_borg_binary_manifest.py
+
+which reads that version and rewrites this manifest.
+``tests/unit/test_borg_binaries.py`` fails if the two ever disagree.
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import NamedTuple
 
-RELEASE_URL = "https://github.com/borgbackup/borg/releases/download/{version}/{asset}"
+MANIFEST_PATH = Path(__file__).with_name("borg_binaries.json")
 
 
 class BorgBinary(NamedTuple):
@@ -30,45 +40,19 @@ class BorgBinary(NamedTuple):
     sha256: str
 
 
+def _load() -> tuple[dict, str, dict[str, str]]:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    binaries = {
+        version: tuple(BorgBinary(**entry) for entry in entries)
+        for version, entries in manifest["binaries"].items()
+    }
+    return binaries, manifest["release_url"], manifest["current"]
+
+
 # Only Linux variants are listed: the managed agent installer is Debian-family
 # only. 32-bit ARM and musl have no published binary at all, which is why the
 # installer has to fail explicitly for them rather than guess.
-BORG_BINARIES: dict[str, tuple[BorgBinary, ...]] = {
-    "1.4.4": (
-        BorgBinary(
-            arch="x86_64",
-            min_glibc="2.31",
-            asset="borg-linux-glibc231-x86_64",
-            sha256="28d8053626bd375837ed4fdb4dda5ef29b2271dbe71a2c6a5749d8f8f0021c6d",
-        ),
-        BorgBinary(
-            arch="x86_64",
-            min_glibc="2.35",
-            asset="borg-linux-glibc235-x86_64-gh",
-            sha256="d48d3a31cf1f6fb781fe240945e0b1c246093d3b94b56ce8f501d46a8615f4de",
-        ),
-        BorgBinary(
-            arch="aarch64",
-            min_glibc="2.35",
-            asset="borg-linux-glibc235-arm64-gh",
-            sha256="7bfe55dfd4088f5c570a9e0d5513b5e01a20c3555eedc95c2d7de952c260eb0f",
-        ),
-    ),
-    "2.0.0b21": (
-        BorgBinary(
-            arch="x86_64",
-            min_glibc="2.35",
-            asset="borg-linux-glibc235-x86_64-gh",
-            sha256="1cde53b9d248c1a600df6f938eea3207f27141be0e8d7a80542fa8f901f221c5",
-        ),
-        BorgBinary(
-            arch="aarch64",
-            min_glibc="2.35",
-            asset="borg-linux-glibc235-arm64-gh",
-            sha256="d008c57e97d977a409e5570a93e805be022ce6a69aef42db4d53dd68f4326a8f",
-        ),
-    ),
-}
+BORG_BINARIES, RELEASE_URL, CURRENT_VERSIONS = _load()
 
 
 def binary_table(versions: dict[str, str | None]) -> str:
