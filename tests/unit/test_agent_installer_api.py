@@ -194,6 +194,18 @@ def test_agent_installer_script_names_the_fallback_for_unsupported_platforms(
     assert "Re-run with --borg-source distro" in response.text
 
 
+def test_agent_installer_installs_rclone_with_borg2(test_client: TestClient):
+    """No Borg release bundles rclone: it is a separate Go program, and without
+    it an entire class of Borg 2 repositories fails at use time."""
+    response = test_client.get("/agent/install.sh")
+
+    install_borg2 = response.text.split("install_borg2() {", 1)[1].split("\n}", 1)[0]
+    assert "install_rclone" in install_borg2
+    # borgstore refuses anything older, and Debian 11 ships 1.53.
+    assert '"1.57.0"' in response.text
+    assert "is older than the 1.57.0 borgstore requires" in response.text
+
+
 def test_agent_installer_forwarders_do_not_escalate(
     test_client: TestClient,
 ):
