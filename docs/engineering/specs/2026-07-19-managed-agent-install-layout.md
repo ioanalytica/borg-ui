@@ -1,167 +1,147 @@
-# Managed Agent Install Layout Spec
+# Managed Agent Installation Spec
 
-Status: target picture, agreed before implementation. Supersedes parts of
-`2026-05-22-borg-installer-management.md` regarding how Borg reaches the node.
+Status: target picture. Supersedes parts of `2026-05-22-borg-installer-management.md`
+regarding where a node's software comes from.
 
 ## Problem
 
-The installer served at `GET /agent/install.sh` gives a node software that does
-not match the server it enrolls against.
+`GET /agent/install.sh` installs a managed agent, and everything it needs comes
+from somewhere outside the deployment:
 
-| Component | Server image | Node today |
+1. **It requires internet access.** Not to the Borg UI server the agent enrolls
+   against — to GitHub and PyPI. An air-gapped site cannot install an agent at
+   all, however well its own network is provisioned.
+2. **It installs build tooling on the host.** Borg 2 is compiled from source on
+   the target machine, so `build-essential`, `python3-dev` and five `-dev`
+   packages are installed — and never removed. A machine enrolled as a backup
+   agent is left with a compiler it did not ask for.
+3. **The agent code comes from a branch, not a release.** The installer runs
+   `pip install git+https://github.com/…@main`. That is an external repository
+   and a moving target, with three consequences: the agent need not match the
+   server it talks to; two machines enrolled on different days within one
+   release cycle need not match each other; and neither is visible to whoever
+   installed them.
+4. **Only Debian-family systems are supported.** The installer refuses anything
+   else, although nothing about the agent itself is Debian-specific.
+
+## Where things come from
+
+The distinction that resolves most of this: the enrolling server should provide
+what only it can provide, and everything else should come from where the site
+already gets its software.
+
+| Component | Source | Rationale |
 | --- | --- | --- |
-| Borg 1 | `1.4.4`, pinned | `apt-get install borgbackup` — 1.2.8 on Ubuntu 24.04 |
-| Borg 2 | `2.0.0b21`, pinned | `pip install --pre "borgbackup>=2.0.0b1,<3"` — unpinned |
-| Agent | built from this tree | `pip install git+https://github.com/…@main` |
+| Agent package | the enrolling server | Only that server knows which agent belongs to it. |
+| Agent dependencies | the enrolling server | Six small wheels; without them a server-provided agent still cannot be installed offline. |
+| Borg | the site's own channels, or the published binaries | Air-gapped sites mirror their distribution, and Borg is in it. |
+| python3, curl | the distribution | Already mirrored; nothing to solve. |
 
-Borg 2 is the acute case: two nodes installed on different days get different
-betas against one server, and repository format changes between betas. The
-agent case matters for anyone whose server runs ahead of `main` — the node must
-get the agent that belongs to *its* server, not whatever `main` holds today.
+A node then needs to reach exactly one host — the one it is enrolling against
+anyway.
 
-Only the server knows the answer to "which versions belong here", so the server
-must be the one to say it.
+## Agent package and dependencies
 
-## Delivery Mechanism
-
-Borg publishes no wheels on PyPI — only sdists, for both 1.4.4 and 2.0.0b21.
-Any pip-based install therefore compiles from source and needs a build
-toolchain on every node. Borg does publish static single-file binaries per
-release, and the relevant Linux matrix is small:
-
-| Release | Variants |
-| --- | --- |
-| 1.4.4 | `glibc231-x86_64`, `glibc235-x86_64`, `glibc235-arm64` |
-| 2.0.0b21 | `glibc235-x86_64`, `glibc235-arm64` |
-
-Static binaries are how a node gets an exact version without a compiler. The
-agent itself stays a venv install: it is pure Python (`requests`,
-`websocket-client`) and pip is needed for those dependencies anyway.
-
-The agent does not use `borg mount`, so the absence of FUSE support in a static
-binary is not a constraint.
-
-Gaps with no static binary — 32-bit ARM (Raspberry Pi OS 32-bit) and musl
-(Alpine) — must fail with an explicit message pointing at the distro fallback,
-not with a download error.
-
-## Node Layout
+The image builds the agent as a `py3-none-any` wheel and serves it. The agent is
+pure Python, so there is nothing to compile for it on any platform, and its
+dependency closure is six wheels totalling under 1 MB, each available in
+universal (`py3-none-any`) form:
 
 ```
-/opt/borg-ui-agent/borg1/<version>/borg   static binary, root:root
-/opt/borg-ui-agent/borg2/<version>/borg   static binary, root:root
-/opt/borg-ui-agent/bin/borg1, borg2       forwarder scripts, root:root 0755
-/opt/borg-ui-agent/.venv/                 agent venv (pure Python)
-/usr/local/bin/borg, borg2                symlinks to the forwarders
-/etc/borg-ui-agent/config.toml            0600, owned by the service user
+requests  urllib3  idna  certifi  charset_normalizer  websocket-client
 ```
 
-Version-scoped directories allow an upgrade to land beside the running version
-instead of replacing it.
+Served alongside the agent wheel, the installer can use
+`pip install --no-index --find-links <server>/agent/dist/ borg-ui-agent`, and the
+installation becomes **air-gapped by construction**: no PyPI, no GitHub, one
+host. It also settles problem 3 outright — the agent matches its server because
+it comes from it, and two machines enrolled a week apart get the same agent as
+long as the server has not changed.
 
-The agent resolves Borg through `PATH` — `agent/borg_ui_agent/borg.py` calls
-`shutil.which("borg")` and there is no configuration key for a binary path. The
-`/usr/local/bin` entries are therefore **the mechanism, not a convenience**:
-`/usr/local/bin` precedes `/usr/bin`, which is what makes the agent run the
-pinned binary rather than the distribution's. Shadowing a distribution `borg`
-is consequently required rather than optional, and the installer only steps
-aside when something that is not a symlink already occupies the path — in which
-case it says so, because version parity is then lost.
+`--agent-source git` remains available for development.
 
-The forwarder is a script rather than a symlink because it is the one place
-that can later carry policy — exit-code handling, or elevation — without
-touching callers. It lives under `/opt/borg-ui-agent` and `/usr/local/bin`
-holds a symlink to it, so that `_classify_install_source()` keeps resolving
-through to an installer-managed path and reporting `borg-ui-installer`.
+## Borg
 
-Forwarders carry the generic wrapper behaviour only: `BORG_VERSION` dispatch,
-and keeping stdout and stderr separate because Borg UI parses `--json` on
-stdout and reads stderr for warnings. Deployment-specific logic (`--remote-path`
-injection, a fixed `/usr/bin/borg` target) does not belong here. Downgrading a
-Borg warning exit code to success is useful but is a policy choice and should be
-opt-in rather than default.
+Borg publishes no wheels on PyPI, only sdists, so any pip-based install compiles
+on the target machine. It does publish static single-file binaries per release,
+built against glibc, covering x86_64 and aarch64. That gives three sources, none
+of which compiles anything:
 
-**The forwarders contain no `sudo`.** Unprivileged users on the machine can run
-`borg` for their own files with their own permissions; that is intended. Putting
-`sudo` in a world-executable forwarder would grant escalation to every caller,
-not only to the agent.
+- **`server`** — the static binary matching the version the server runs,
+  verified against a checksum manifest kept in this repository. Exact version
+  parity, but it fetches from the release URL, so it is an online default rather
+  than an air-gapped one.
+- **`distro`** — the distribution's package, which is what an air-gapped site's
+  mirror provides. The version is then the distribution's: Ubuntu 24.04 ships
+  Borg 1.2.8 where a server may run 1.4.4, but Alpine 3.24 ships 1.4.4 exactly,
+  so this is not uniformly a downgrade.
+- **`detect`** — use whatever is already installed, verify its major version,
+  and report when it differs from the server's instead of proceeding silently.
 
-## Privilege Model
+Compiling Borg on the target stays possible but should not be a default: it
+reintroduces exactly the toolchain that problem 2 is about. Where no static
+binary exists — 32-bit ARM, musl — the installer should name the distribution
+route rather than fail on a download that was never going to work.
 
-Backing up everything requires reading files the service user does not own. The
-minimal mechanism for exactly that is a capability on the unit:
+## Platform support
 
-```
-AmbientCapabilities=CAP_DAC_READ_SEARCH
-```
+Once the agent comes from the server and Borg has a distribution route, nothing
+in the installation is Debian-specific except the package-manager invocations
+and the service manager. Supporting further families is then a matter of
+abstracting those two, not of new architecture — which is what makes problem 4
+tractable rather than open-ended.
 
-This grants "may read any file" and nothing else — no writing, no `chown`, no
-command execution. It inherits to the Borg child process, is scoped to the
-service rather than to a binary anyone can execute, and is compatible with
-`NoNewPrivileges=true`, which stays set.
+## Provisioning
 
-Restore to the original location is the only operation needing more (write,
-`chown`), and is out of scope for the first implementation. When it is built it
-must be an explicit, separately chosen install option, because:
+An installed agent is not yet a working one. Before it backs anything up it
+needs, on the server side: an enrolment, a registered repository, and a backup
+plan; optionally a check schedule. Today the installer performs the enrolment
+only, and the rest is manual work in the UI.
 
-- `sudo` cannot work while `NoNewPrivileges=true` is set, so enabling it
-  weakens the unit's baseline;
-- a sudoers rule scoped to the Borg binary restricts *who* may escalate, not
-  *what* they may do: `--rsh` is a regular Borg option in both 1.4 and 2, so
-  `sudo borg --rsh '<command>' …` executes arbitrary commands as root. It must
-  be documented as granting the agent account effective root, not as
-  confinement.
-- `sudo` resets the environment, so `BORG_PASSPHRASE` would not reach the
-  escalated process. `BORG_PASSCOMMAND` is preferable to an `env_keep`
-  exception, since it keeps the secret out of the process list.
+Given an administrator credential, the installer can do all of it, as a chain in
+which each step is a precondition for the next:
 
-Forwarders and the `/opt` tree must be `root:root` and not writable by the
-service user; otherwise the agent can rewrite a forwarder and any sudoers rule
-becomes moot.
+1. obtain an administrator bearer token,
+2. mint a one-time enrolment token and register the agent — or recognise that
+   this machine is already enrolled, and re-enrol if the server no longer knows
+   it,
+3. register the repository this agent will use, together with its passphrase,
+   which the server stores and hands back per job,
+4. optionally set a check schedule (auxiliary — nothing depends on it),
+5. optionally register a backup plan.
 
-## Credential Model
+Every step has to be idempotent: re-running the installer on a provisioned
+machine must converge rather than duplicate. A failure in the chain must abort
+rather than leave a half-provisioned agent behind.
 
-The service user holds the SSH key for the remote repository and knows the
-repository URL. It never holds `BORG_PASSPHRASE`: the passphrase arrives from
-Borg UI per job over the agent session and is passed to the Borg child process
-in its environment only. It is not at rest on the node.
+A personal access token is the right credential to ask for. A username and
+password is a weaker fallback, because password login can be disabled
+server-side (`oidc_disable_local_auth`), and it then fails for administrators
+too.
 
-Unprivileged users on the machine cannot reach any of it: `/etc/borg-ui-agent`
-is `0750` and `config.toml` is `0600`.
+## Interactive mode
 
-## Scope
+The values this needs — server URL, agent name, repository URL and passphrase,
+whether to register a plan — are exactly what an interactive installer can ask
+for, which is friendlier than a command line of eight flags. Non-interactive use
+must remain possible for automation: every prompt needs a corresponding flag,
+and supplying the flag suppresses the prompt.
 
-First implementation — backup only:
+The passphrase is entered once and handed to the server, which is where
+repository credentials already live. It is not written to the node.
 
-- server reports the Borg versions it runs, determined at runtime rather than
-  maintained as a second constant;
-- installer obtains those exact versions as static binaries, verified against
-  a checksum manifest kept in this repository;
-- installer obtains the agent from the enrolling server instead of GitHub;
-- node layout and forwarders as above;
-- `CAP_DAC_READ_SEARCH` on the unit;
-- explicit failure with a distro fallback where no static binary exists.
+## Open decisions
 
-Deliberately later:
+- **Who creates the Borg repository?** Registering it with Borg UI is not the
+  same as it existing. Creating it during installation needs the passphrase and
+  a reachable target at that moment, and moves a class of failure into the
+  installer; requiring it to exist beforehand puts a manual step in front of
+  installation.
+- **How far does provisioning go by default?** Enrolment alone is defensible, and
+  so is the full chain whenever an administrator token is supplied.
+- **Whether the agent should carry a scoped credential of its own**, so that the
+  installer never holds an administrator token, even transiently.
 
-- air-gapped operation. The node still reaches PyPI for the agent's two
-  dependencies, and the binaries still come from the upstream release URL. The
-  checksum manifest is the seed for that step: serving assets from the server
-  changes only the base URL, not the shape of the script.
-- restore with elevation.
+## Non-goals
 
-Not in scope: replacing an existing Borg binary, automatic upgrades, macOS or
-Windows.
-
-## Open Points
-
-- Whether `install.sh` moves from the Python string constant into a real file.
-  Worth doing for maintainability, but it is the largest possible structural
-  diff against upstream and would make every future upstream change to the
-  installer a manual reconciliation for a fork. `shellcheck` coverage does not
-  depend on it — the existing `bash -n` test already validates the served
-  content and can call `shellcheck` instead. Best pursued as a separate,
-  self-contained upstream change.
-
-Resolved during implementation: whether the forwarders should shadow a
-distribution `borg` by default. They must — see Node Layout above.
+Replacing an existing Borg binary; automatic Borg upgrades; macOS and Windows.
