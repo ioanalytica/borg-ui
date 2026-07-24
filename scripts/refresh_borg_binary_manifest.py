@@ -173,14 +173,51 @@ def bump_dockerfile(major: str, new_version: str) -> None:
     DOCKERFILE.write_text(text, encoding="utf-8")
 
 
+def _coverage(binaries: list[dict]) -> dict[str, str]:
+    """The lowest glibc offered per architecture — the floor a machine of that
+    architecture must clear to get a server-source binary at all."""
+    lowest: dict[str, str] = {}
+    for entry in binaries:
+        arch, glibc = entry["arch"], entry["min_glibc"]
+        if arch not in lowest or Version(glibc) < Version(lowest[arch]):
+            lowest[arch] = glibc
+    return lowest
+
+
+def _coverage_regressions(old: list[dict], new: list[dict]) -> list[str]:
+    """How adopting `new` narrows the platforms a server-source install reaches.
+
+    borgbackup changes which static binaries it publishes without saying so in
+    the changelog — 1.4.5 dropped the glibc 2.31 x86_64 build, raising that floor
+    to 2.35 with no release note. A version bump can therefore quietly drop an
+    architecture or push its glibc floor past machines that used to be covered.
+    Comparing the manifests turns that into a line the PR can shout.
+    """
+    before, after = _coverage(old), _coverage(new)
+    notes = []
+    for arch, floor in sorted(before.items()):
+        if arch not in after:
+            notes.append(f"drops {arch} (was glibc {floor})")
+        elif Version(after[arch]) > Version(floor):
+            notes.append(f"raises {arch} glibc floor {floor} -> {after[arch]}")
+    return notes
+
+
 def _emit_output(**values: str) -> None:
-    """Hand results to the workflow step through GITHUB_OUTPUT, when set."""
+    """Hand results to the workflow step through GITHUB_OUTPUT, when set.
+
+    A value spanning several lines is written with the heredoc form GitHub
+    Actions requires; single-line values keep the plain key=value form.
+    """
     path = os.environ.get("GITHUB_OUTPUT")
     if not path:
         return
     with open(path, "a", encoding="utf-8") as handle:
         for key, value in values.items():
-            handle.write(f"{key}={value}\n")
+            if "\n" in value:
+                handle.write(f"{key}<<__EOF__\n{value}\n__EOF__\n")
+            else:
+                handle.write(f"{key}={value}\n")
 
 
 def adopt_latest() -> int:
@@ -197,18 +234,40 @@ def adopt_latest() -> int:
         _emit_output(changed="false")
         return 0
 
+    # Read the coverage the outgoing versions offer before the manifest is
+    # overwritten, so the new binaries can be measured against it.
+    old_binaries = json.loads(MANIFEST.read_text(encoding="utf-8")).get("binaries", {})
+
+    warnings = []
     for major, new_version in bumps.items():
         print(f"Borg {major}: {current[major]} -> {new_version}")
         bump_dockerfile(major, new_version)
+        regressions = _coverage_regressions(
+            old_binaries.get(current[major], []), binaries_for(new_version)
+        )
+        for note in regressions:
+            warnings.append(f"Borg {major} {new_version} {note}")
     write_manifest({**current, **bumps})
-    _emit_output(
-        changed="true",
-        title="chore(agent-installer): adopt Borg "
-        + ", ".join(f"{major} {ver}" for major, ver in bumps.items()),
-        summary="; ".join(
-            f"Borg {major} {current[major]} -> {ver}" for major, ver in bumps.items()
-        ),
+
+    title = "chore(agent-installer): adopt " + ", ".join(
+        f"Borg {major} {ver}" for major, ver in bumps.items()
     )
+    summary = "; ".join(
+        f"Borg {major} {current[major]} -> {ver}" for major, ver in bumps.items()
+    )
+    warnings_md = ""
+    if warnings:
+        title += " — coverage regression"
+        print("\nCOVERAGE REGRESSION:")
+        for note in warnings:
+            print(f"  - {note}")
+        warnings_md = (
+            "> [!WARNING]\n"
+            "> This bump narrows which machines a server-source install reaches. "
+            "Affected machines fall back to `--borg-source distro`:\n"
+            + "\n".join(f"> - {note}" for note in warnings)
+        )
+    _emit_output(changed="true", title=title, summary=summary, warnings_md=warnings_md)
     return 0
 
 

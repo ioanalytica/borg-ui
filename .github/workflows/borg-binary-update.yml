@@ -59,6 +59,8 @@ jobs:
           body: |
             ${{ steps.refresh.outputs.summary }}.
 
+            ${{ steps.refresh.outputs.warnings_md }}
+
             Opened automatically because borgbackup published a release newer than
             the one this repo pins. The Dockerfile ARG and the binary manifest are
             already updated here.
