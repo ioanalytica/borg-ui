@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -105,3 +106,35 @@ def test_app_dockerfile_uses_rclone_runtime_base_tag():
         f"ARG BASE_IMAGE=docker.io/ainullcode/borg-ui-runtime-base:{expected_tag}"
         in dockerfile
     )
+
+
+def test_runtime_base_tag_names_the_borg_versions_the_image_builds():
+    """The image tag encodes the Borg versions inside it. A version bump that
+    forgets to re-tag would ship an image labelled for a Borg it does not
+    contain, so the tag's components must equal the ARGs it is built from — and
+    the standalone versions in the same env file must agree with the tag."""
+    repo_root = Path(__file__).resolve().parents[2]
+    dockerfile = (repo_root / "Dockerfile.runtime-base").read_text()
+    env = (repo_root / "docker" / "runtime-base.env").read_text()
+
+    built = {
+        major: re.search(rf"^ARG BORG{major}_VERSION=(\S+)", dockerfile, re.M).group(1)
+        for major in ("1", "2")
+    }
+    tag = re.search(r"^BORG_RUNTIME_BASE_TAG=(\S+)", env, re.M).group(1)
+    tagged = re.match(r"runtime-borg1-(?P<b1>.+?)-borg2-(?P<b2>.+)-r\d+$", tag)
+    assert tagged, f"unexpected runtime-base tag shape: {tag}"
+
+    assert tagged["b1"] == built["1"], (
+        f"tag names Borg 1 {tagged['b1']} but the image builds {built['1']}"
+    )
+    assert tagged["b2"] == built["2"], (
+        f"tag names Borg 2 {tagged['b2']} but the image builds {built['2']}"
+    )
+
+    for major in ("1", "2"):
+        standalone = re.search(rf"^BORG{major}_VERSION=(\S+)", env, re.M).group(1)
+        assert standalone == built[major], (
+            f"runtime-base.env pins Borg {major} {standalone}, "
+            f"image builds {built[major]}"
+        )
