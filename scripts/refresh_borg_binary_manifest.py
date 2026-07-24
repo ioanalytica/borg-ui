@@ -8,6 +8,13 @@ therefore: change the ARG, run this, commit.
 
     python scripts/refresh_borg_binary_manifest.py            # versions from the Dockerfile
     python scripts/refresh_borg_binary_manifest.py 1.4.5 2.0.0b22   # or state them
+    python scripts/refresh_borg_binary_manifest.py --latest   # adopt newer releases
+
+--latest asks GitHub which releases exist, and if a newer one carries the Linux
+binaries this installer needs, bumps the ARG in Dockerfile.runtime-base and
+regenerates the manifest. It is what the scheduled workflow runs to open the
+adoption PR; the version literals wired into the tests stay for a human to
+reconcile, which is the point — the red build is the checklist.
 
 The digests come from the release API rather than from hashing a download, so a
 version bump does not require pulling ~180 MB of binaries. Nothing here runs at
@@ -18,16 +25,20 @@ download against a value it did not fetch alongside the file.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import urllib.request
 from pathlib import Path
+
+from packaging.version import InvalidVersion, Version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILE = REPO_ROOT / "Dockerfile.runtime-base"
 MANIFEST = REPO_ROOT / "app" / "api" / "borg_binaries.json"
 
 API = "https://api.github.com/repos/borgbackup/borg/releases/tags/{version}"
+RELEASES_API = "https://api.github.com/repos/borgbackup/borg/releases?per_page=100"
 RELEASE_URL = "https://github.com/borgbackup/borg/releases/download/{version}/{asset}"
 
 # Published asset name -> (uname -m arch, oldest glibc it was built against).
@@ -38,6 +49,24 @@ KNOWN_VARIANTS = {
     "borg-linux-glibc235-x86_64-gh": ("x86_64", "2.35"),
     "borg-linux-glibc235-arm64-gh": ("aarch64", "2.35"),
 }
+
+
+def _get_json(url: str):
+    """Fetch and decode JSON, authenticating if a token is in the environment.
+
+    The GitHub API rate-limits anonymous callers to 60 requests an hour, which a
+    scheduled workflow shares with everything else on the runner. GITHUB_TOKEN
+    lifts that to 5000; unset (a local run), the request is anonymous and still
+    works.
+    """
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/vnd.github+json"}
+    )
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
 
 
 def versions_from_dockerfile() -> dict[str, str]:
@@ -52,10 +81,8 @@ def versions_from_dockerfile() -> dict[str, str]:
     return versions
 
 
-def binaries_for(version: str) -> list[dict]:
-    with urllib.request.urlopen(API.format(version=version), timeout=30) as response:
-        release = json.load(response)
-
+def _linux_binaries(release: dict) -> list[dict]:
+    """The manifest entries an installer can use from a release's assets."""
     entries = []
     for asset in release.get("assets", []):
         variant = KNOWN_VARIANTS.get(asset["name"])
@@ -73,7 +100,11 @@ def binaries_for(version: str) -> list[dict]:
                 "sha256": digest.removeprefix("sha256:"),
             }
         )
+    return entries
 
+
+def binaries_for(version: str) -> list[dict]:
+    entries = _linux_binaries(_get_json(API.format(version=version)))
     if not entries:
         raise SystemExit(
             f"Borg {version} publishes no Linux binary this installer can use"
@@ -81,26 +112,122 @@ def binaries_for(version: str) -> list[dict]:
     return entries
 
 
-def main() -> int:
-    if len(sys.argv) > 1:
-        given = sys.argv[1:]
-        if len(given) != 2:
-            raise SystemExit("Pass both versions (Borg 1 then Borg 2), or neither")
-        current = {"1": given[0], "2": given[1]}
-    else:
-        current = versions_from_dockerfile()
-        print(f"Versions from {DOCKERFILE.name}: {current['1']}, {current['2']}")
-
+def write_manifest(current: dict[str, str]) -> None:
+    """Regenerate borg_binaries.json for the given Borg 1 and Borg 2 versions."""
     manifest = {
         "current": current,
         "release_url": RELEASE_URL,
         "binaries": {version: binaries_for(version) for version in current.values()},
     }
     MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-
     for version, entries in manifest["binaries"].items():
         print(f"  {version}: {len(entries)} binaries")
     print(f"Wrote {MANIFEST.relative_to(REPO_ROOT)}")
+
+
+def _covers_both_arches(release: dict) -> bool:
+    """A release is adoptable only if it carries both architectures the tests
+    require; a half-published one is skipped and picked up on a later run."""
+    return {"x86_64", "aarch64"} <= {
+        entry["arch"] for entry in _linux_binaries(release)
+    }
+
+
+def latest_adoptable() -> dict[str, str]:
+    """The newest release GitHub publishes for each line: a stable 1.x, and a
+    2.x that may still be a beta, since that is what this repo pins today."""
+    latest: dict[str, Version] = {}
+    for release in _get_json(RELEASES_API):
+        if release.get("draft"):
+            continue
+        try:
+            version = Version(release["tag_name"])
+        except InvalidVersion:
+            continue
+        major = str(version.major)
+        if major not in ("1", "2"):
+            continue
+        if major == "1" and version.is_prerelease:
+            continue
+        if version <= latest.get(major, Version("0")):
+            continue
+        if _covers_both_arches(release):
+            latest[major] = version
+    if set(latest) != {"1", "2"}:
+        missing = {"1", "2"} - set(latest)
+        raise SystemExit(f"No adoptable Borg release found for line(s) {missing}")
+    return {major: str(version) for major, version in latest.items()}
+
+
+def bump_dockerfile(major: str, new_version: str) -> None:
+    """Rewrite every ARG BORG{major}_VERSION in Dockerfile.runtime-base."""
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    text, count = re.subn(
+        rf"^(ARG BORG{major}_VERSION=)\S+",
+        rf"\g<1>{new_version}",
+        text,
+        flags=re.M,
+    )
+    if not count:
+        raise SystemExit(f"No ARG BORG{major}_VERSION in {DOCKERFILE.name}")
+    DOCKERFILE.write_text(text, encoding="utf-8")
+
+
+def _emit_output(**values: str) -> None:
+    """Hand results to the workflow step through GITHUB_OUTPUT, when set."""
+    path = os.environ.get("GITHUB_OUTPUT")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as handle:
+        for key, value in values.items():
+            handle.write(f"{key}={value}\n")
+
+
+def adopt_latest() -> int:
+    """Bump the Dockerfile and manifest to the newest published releases."""
+    current = versions_from_dockerfile()
+    latest = latest_adoptable()
+    bumps = {
+        major: latest[major]
+        for major in ("1", "2")
+        if Version(latest[major]) > Version(current[major])
+    }
+    if not bumps:
+        print(f"Up to date: Borg {current['1']}, {current['2']}")
+        _emit_output(changed="false")
+        return 0
+
+    for major, new_version in bumps.items():
+        print(f"Borg {major}: {current[major]} -> {new_version}")
+        bump_dockerfile(major, new_version)
+    write_manifest({**current, **bumps})
+    _emit_output(
+        changed="true",
+        title="chore(agent-installer): adopt Borg "
+        + ", ".join(f"{major} {ver}" for major, ver in bumps.items()),
+        summary="; ".join(
+            f"Borg {major} {current[major]} -> {ver}" for major, ver in bumps.items()
+        ),
+    )
+    return 0
+
+
+def main() -> int:
+    if sys.argv[1:] == ["--latest"]:
+        return adopt_latest()
+
+    if len(sys.argv) > 1:
+        given = sys.argv[1:]
+        if len(given) != 2:
+            raise SystemExit(
+                "Pass both versions (Borg 1 then Borg 2), --latest, or neither"
+            )
+        current = {"1": given[0], "2": given[1]}
+    else:
+        current = versions_from_dockerfile()
+        print(f"Versions from {DOCKERFILE.name}: {current['1']}, {current['2']}")
+
+    write_manifest(current)
     return 0
 
 
