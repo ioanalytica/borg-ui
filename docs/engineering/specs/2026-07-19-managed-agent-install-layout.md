@@ -83,6 +83,26 @@ reintroduces exactly the toolchain that problem 2 is about. Where no static
 binary exists — 32-bit ARM, musl — the installer should name the distribution
 route rather than fail on a download that was never going to work.
 
+### Keeping the manifest current
+
+The `server` source is only as current as the checksum manifest it verifies
+against, and the version parity it promises only holds while that manifest tracks
+what the runtime base builds. The version is stated once, in the Dockerfile ARG,
+and `refresh_borg_binary_manifest.py` derives the manifest from it; a `--latest`
+mode asks GitHub which releases exist and, when a newer one publishes the Linux
+binaries this installer needs, bumps the ARG and regenerates the manifest. A
+weekly workflow runs that mode and opens a PR, so the pin drifts behind
+borgbackup by at most a release rather than by however long nobody happened to
+look.
+
+That PR is deliberately incomplete. The version is also written into the string
+tests on purpose — they are the checklist for adopting a version — and the
+runtime-base image tag carries a manual revision, so the PR fails CI until a
+human reconciles both. The workflow does the mechanical half and makes the
+remaining half visible; it does not merge. This keeps the repository's pin
+current, which is distinct from the non-goal of upgrading Borg on an
+already-installed node.
+
 ## Platform support
 
 Once the agent comes from the server and Borg has a distribution route, nothing
