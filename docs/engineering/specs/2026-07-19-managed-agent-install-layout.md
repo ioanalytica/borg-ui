@@ -95,6 +95,16 @@ weekly workflow runs that mode and opens a PR, so the pin drifts behind
 borgbackup by at most a release rather than by however long nobody happened to
 look.
 
+Not every newer release is a safe adoption, and the changelog does not say which
+are: borgbackup drops and adds published binaries silently — 1.4.5 stopped
+shipping the glibc 2.31 x86_64 build, raising that floor to 2.35 with no release
+note. So `--latest` measures the incoming binaries against the ones they replace,
+per architecture, and reports any narrowing — an architecture that disappears, or
+a glibc floor that rises past machines that were covered — in the PR title and a
+warning in its body. It flags rather than blocks: the affected machines fall back
+to `--borg-source distro`, so the regression is a decision for the reviewer, not
+a reason to withhold the release.
+
 That PR is deliberately incomplete. The version is also written into the string
 tests on purpose — they are the checklist for adopting a version — and the
 runtime-base image tag carries a manual revision, so the PR fails CI until a
