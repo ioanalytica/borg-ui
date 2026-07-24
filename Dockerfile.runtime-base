@@ -13,7 +13,7 @@
 # --- builder: compile the Borg wheels (needs the toolchain + -dev headers) ----
 FROM python:3.10-slim AS builder
 
-ARG BORG1_VERSION=1.4.4
+ARG BORG1_VERSION=1.4.5
 ARG BORG2_VERSION=2.0.0b21
 ARG BORGSTORE_VERSION=0.4.1
 
@@ -53,7 +53,7 @@ RUN pip install --no-cache-dir pyfuse3 "borgbackup[fuse]==${BORG1_VERSION}" && \
 # --- runtime-base: slim image, no compilers — runtime libs + operational tools -
 FROM python:3.10-slim AS runtime-base
 
-ARG BORG1_VERSION=1.4.4
+ARG BORG1_VERSION=1.4.5
 ARG BORG2_VERSION=2.0.0b21
 ENV BORG1_VERSION=${BORG1_VERSION}
 ENV BORG2_VERSION=${BORG2_VERSION}

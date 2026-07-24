@@ -1,28 +1,22 @@
 {
   "current": {
-    "1": "1.4.4",
+    "1": "1.4.5",
     "2": "2.0.0b21"
   },
   "release_url": "https://github.com/borgbackup/borg/releases/download/{version}/{asset}",
   "binaries": {
-    "1.4.4": [
-      {
-        "arch": "x86_64",
-        "min_glibc": "2.31",
-        "asset": "borg-linux-glibc231-x86_64",
-        "sha256": "28d8053626bd375837ed4fdb4dda5ef29b2271dbe71a2c6a5749d8f8f0021c6d"
-      },
+    "1.4.5": [
       {
         "arch": "aarch64",
         "min_glibc": "2.35",
         "asset": "borg-linux-glibc235-arm64-gh",
-        "sha256": "7bfe55dfd4088f5c570a9e0d5513b5e01a20c3555eedc95c2d7de952c260eb0f"
+        "sha256": "aae37546320810969d2f3cb41a23ec6b86f7fa1c5f868e18f10285978bc977e7"
       },
       {
         "arch": "x86_64",
         "min_glibc": "2.35",
         "asset": "borg-linux-glibc235-x86_64-gh",
-        "sha256": "d48d3a31cf1f6fb781fe240945e0b1c246093d3b94b56ce8f501d46a8615f4de"
+        "sha256": "1410e28609be3080d0e3ab27a78f5c586a29fd0c75c2aa6415fcde1293bcd923"
       }
     ],
     "2.0.0b21": [
