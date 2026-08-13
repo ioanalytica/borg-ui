@@ -497,7 +497,13 @@ export const BackupJobsTable = <T extends Job = Job>({
       align: 'left',
       width: '80px',
       render: (job: T) => (
-        <Typography variant="body2" fontWeight={600} color="primary">
+        <Typography
+          variant="body2"
+          color="primary"
+          sx={{
+            fontWeight: 600,
+          }}
+        >
           #{job.id}
         </Typography>
       ),
@@ -613,7 +619,15 @@ export const BackupJobsTable = <T extends Job = Job>({
         const transportLabel = getTransportLabel(job.execution_mode, job.route_strategy, t)
         const skipReasonLabel = getSkipReasonLabel(job, t)
         return (
-          <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Stack
+            direction="row"
+            spacing={0.75}
+            useFlexGap
+            sx={{
+              alignItems: 'center',
+              flexWrap: 'wrap',
+            }}
+          >
             <StatusBadge status={job.status} tooltip={skipReasonLabel || undefined} />
             {skipReasonLabel && (
               <Chip size="small" variant="outlined" color="default" label={skipReasonLabel} />
@@ -632,8 +646,11 @@ export const BackupJobsTable = <T extends Job = Job>({
         <Tooltip title={job.started_at ? formatDateTimeFull(job.started_at) : ''} arrow>
           <Typography
             variant="body2"
-            color="text.secondary"
-            sx={{ cursor: job.started_at ? 'help' : 'default', display: 'inline-block' }}
+            sx={{
+              color: 'text.secondary',
+              cursor: job.started_at ? 'help' : 'default',
+              display: 'inline-block',
+            }}
           >
             {job.started_at ? formatDate(job.started_at) : '-'}
           </Typography>
@@ -646,7 +663,12 @@ export const BackupJobsTable = <T extends Job = Job>({
       align: 'left',
       width: '110px',
       render: (job: T) => (
-        <Typography variant="body2" color="text.secondary">
+        <Typography
+          variant="body2"
+          sx={{
+            color: 'text.secondary',
+          }}
+        >
           {formatTimeRange(job.started_at, job.completed_at, job.status)}
         </Typography>
       ),
