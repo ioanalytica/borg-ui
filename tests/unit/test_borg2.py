@@ -1,3 +1,4 @@
+import inspect
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -249,23 +250,39 @@ def test_repo_info_without_a_usable_encryption_block_is_untouched(info):
     assert normalize_repo_info_encryption(info) == before
 
 
+def _bypass_lock_commands() -> list[str]:
+    """Every borg2 command builder that takes a bypass_lock argument.
+
+    Read off the interface rather than listed, so a new command that accepts
+    bypass_lock is covered the day it is added, and a renamed one fails loudly
+    instead of quietly dropping out of the parametrisation.
+    """
+    names = [
+        name
+        for name, member in inspect.getmembers(borg2, inspect.iscoroutinefunction)
+        if not name.startswith("_")
+        and "bypass_lock" in inspect.signature(member).parameters
+    ]
+    assert names, "no borg2 command takes bypass_lock — has the interface moved?"
+    return names
+
+
+# Stand-ins for the arguments a command needs besides bypass_lock. Nothing is
+# executed: create_subprocess_exec is replaced, so only the argv is built.
+_ARGUMENTS = {
+    "repository": "/repo",
+    "archive": "series",
+    "paths": ["etc/hosts"],
+    "destination": "/restore",
+    "path": "etc/hosts",
+    "mount_point": "/mnt/repo",
+}
+
+
 @pytest.mark.unit
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("call", "kwargs"),
-    [
-        ("rinfo", {}),
-        ("info_repo", {}),
-        ("list_repo", {}),
-        ("info_archive", {"archive": "series"}),
-        ("list_archive_contents", {"archive": "series"}),
-        (
-            "extract_archive",
-            {"archive": "series", "paths": ["etc/hosts"], "destination": "/restore"},
-        ),
-    ],
-)
-async def test_no_borg2_command_carries_bypass_lock(monkeypatch, call, kwargs):
+@pytest.mark.parametrize("command", _bypass_lock_commands())
+async def test_no_borg2_command_carries_bypass_lock(monkeypatch, command):
     """--bypass-lock is a Borg 1 flag. Borg 2 has never had it — it is absent
     from the 2.0.0b21 and 2.0.0b22 sources alike — so a Borg 2 command carrying
     it dies at argument parsing, which reads as an unreachable repository rather
@@ -287,10 +304,12 @@ async def test_no_borg2_command_carries_bypass_lock(monkeypatch, call, kwargs):
     monkeypatch.setattr(
         "app.core.borg2.asyncio.create_subprocess_exec", create_subprocess_exec
     )
-    method = getattr(borg2, call, None)
-    if method is None:
-        pytest.skip(f"borg2 has no {call}()")
+    method = getattr(borg2, command)
+    kwargs = {"bypass_lock": True}
+    for name, parameter in inspect.signature(method).parameters.items():
+        if parameter.default is inspect.Parameter.empty and name in _ARGUMENTS:
+            kwargs[name] = _ARGUMENTS[name]
 
-    await method(repository="/repo", bypass_lock=True, **kwargs)
+    await method(**kwargs)
 
     assert "--bypass-lock" not in list(captured["cmd"])
