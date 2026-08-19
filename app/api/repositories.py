@@ -90,6 +90,7 @@ from app.services.job_admission import (
     ensure_repository_admission,
 )
 from app.services.log_policy import get_log_save_policy, job_has_logs_by_policy
+from app.services.repository_info_sync import sync_archive_stats_from_info
 from app.services.repository_command_lock import run_serialized_repository_command
 from app.services.rclone_repository_service import (
     SYNC_DIRECTION_AGENT_TO_REMOTE,
@@ -6079,6 +6080,10 @@ async def get_repository_info(
                 agent_job_id=agent_job.id,
                 archive_count=len(archives),
             )
+            # The card renders the stored columns; sync them from the list just
+            # fetched (Borg 2 only — the helper guards), or the dialog shows a
+            # count the card contradicts.
+            sync_archive_stats_from_info(repository, info_data, db)
             return {
                 "success": True,
                 "info": {

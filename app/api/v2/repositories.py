@@ -24,6 +24,7 @@ from app.core.borg2 import (
     normalize_repo_info_encryption,
 )
 from app.core.borg_errors import is_lock_error
+from app.services.repository_info_sync import sync_archive_stats_from_info
 from app.services.agent_job_dispatcher import dispatch_agent_job_best_effort
 from app.services.repository_command_lock import run_serialized_repository_command
 from app.services.repository_executor import (
@@ -569,6 +570,7 @@ async def get_repository_info(
                 info_data["repository"] = rinfo_data["repository"]
             if rinfo_data.get("encryption") and not info_data.get("encryption"):
                 info_data["encryption"] = rinfo_data["encryption"]
+            sync_archive_stats_from_info(repo, info_data, db)
             return {
                 "info": normalize_repo_info_encryption(info_data),
                 "borg_version": 2,
@@ -633,6 +635,10 @@ async def get_repository_info(
                     }
             except Exception:
                 pass
+
+        # The card renders the stored columns; sync them from the list just
+        # fetched, or the dialog shows a count the card contradicts.
+        sync_archive_stats_from_info(repo, info_data, db)
 
         # Normalised on the way out, not at either parse site: both `info --json`
         # and `repo-info --json` carry the block, and the merge above only fires
