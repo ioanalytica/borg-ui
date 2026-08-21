@@ -21,6 +21,12 @@ Key command differences from Borg 1:
     borg2 check    REPO
     borg2 mount    REPO::ARCHIVE  MOUNTPOINT
 
+  --bypass-lock is Borg 1 only. Borg 2 has never had it — it is absent from
+  2.0.0b21 and 2.0.0b22 alike — so the bypass_lock arguments below are accepted
+  (callers and the repository settings speak for both majors) and ignored. A
+  Borg 2 command that carried it failed at argument parsing, which read as an
+  unreachable repository rather than as a flag this Borg does not know.
+
   Encryption modes (borg 2 only), translated to repo-create's
   --encryption/--key-location split by BORG2_ENCRYPTION_FLAGS:
     repokey-aes-ocb            (default — recommended)
@@ -390,8 +396,6 @@ class Borg2Interface:
         cmd = [self.borg_cmd, "-r", repository, "info", "--json"]
         if remote_path:
             cmd.extend(["--remote-path", remote_path])
-        if bypass_lock:
-            cmd.append("--bypass-lock")
         exec_env = env.copy() if env else {}
         if passphrase:
             exec_env["BORG_PASSPHRASE"] = passphrase
@@ -447,8 +451,6 @@ class Borg2Interface:
         cmd = [self.borg_cmd, "-r", repository, "info", "--json", archive]
         if remote_path:
             cmd.extend(["--remote-path", remote_path])
-        if bypass_lock:
-            cmd.append("--bypass-lock")
         exec_env = env.copy() if env else {}
         if passphrase:
             exec_env["BORG_PASSPHRASE"] = passphrase
@@ -472,8 +474,6 @@ class Borg2Interface:
             cmd.extend(["--depth", str(browse_depth)])
         if remote_path:
             cmd.extend(["--remote-path", remote_path])
-        if bypass_lock:
-            cmd.append("--bypass-lock")
         cmd.append(archive)
         if path:
             cmd.append(path.strip("/"))
@@ -546,8 +546,6 @@ class Borg2Interface:
             cmd.extend(["--remote-path", remote_path])
         if dry_run:
             cmd.append("--dry-run")
-        if bypass_lock:
-            cmd.append("--bypass-lock")
         cmd.append(archive)
         if paths:
             cmd.extend(paths)
