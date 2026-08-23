@@ -358,7 +358,8 @@ This grants powerful host access to the Borg UI container. You can avoid mountin
 
 Archive mounting uses `borg mount` and requires FUSE access.
 
-Remote source backups and SSH restore destinations use SSHFS and also require FUSE access.
+Remote source backups in SSHFS pull mode and SSH restore destinations also use
+FUSE (through SSHFS); Remote Direct Backups do not.
 
 ```yaml
 cap_add:
@@ -371,7 +372,14 @@ environment:
   - BORG_FUSE_IMPL=pyfuse3
 ```
 
-Add this only if you need archive mounts, SSHFS remote source backups, or SSH restore destinations. See [Mounting Archives](mounting).
+Add this only if you need archive mounts, SSHFS remote source backups, or SSH
+restore destinations. The host also needs FUSE itself: `/dev/fuse` must exist
+there (`ls -l /dev/fuse`; if it is missing, `modprobe fuse`). Without it, and
+without the lines above, SSHFS pull-mode backups fail with
+`fuse: device not found` before they read a single file. `SYS_ADMIN` plus `apparmor:unconfined` widens the
+container's privileges noticeably - Remote Direct Backups need neither. See
+[Mounting Archives](mounting) and
+[Remote Machines](ssh-keys#remote-source-backups).
 
 ## Docker Run
 

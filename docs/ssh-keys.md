@@ -137,6 +137,25 @@ for Borg UI's Borg-over-SSH repository setup. See
 [Provider Guides](provider-guides) for BorgBase, Hetzner Storage Box, Synology,
 Unraid, and other hosted or NAS examples.
 
+## Remote Source Backups
+
+A backup plan can use a Remote Machine as its *source*. Borg UI runs that
+backup in one of two ways:
+
+- **SSHFS pull mode** (the default): the container mounts the remote
+  filesystem with SSHFS and runs `borg create` itself. This needs FUSE access
+  from the Docker host - `/dev/fuse`, the `SYS_ADMIN` capability and an
+  AppArmor exception - none of which the basic Compose setup grants. See
+  [Optional FUSE Access](installation#optional-fuse-access) for the exact
+  lines. Without them the job fails before it reads a single file (see
+  [Troubleshooting](#sshfs-mount-fails-with-fuse-device-not-found)).
+- **Remote Direct Backup**: `borg create` runs on the remote machine itself,
+  see below. It needs no FUSE access and no extra container privileges.
+
+`SYS_ADMIN` plus `apparmor:unconfined` is a real widening of the container's
+privileges. If you would rather not grant it, put source and repository on the
+same Remote Machine and use Remote Direct Backup mode instead.
+
 ## Remote Direct Backups
 
 When a backup plan uses an SSH source and an SSH repository on the same SSH
@@ -226,3 +245,19 @@ The remote user needs read access to source paths and write access to repository
 ### Host key changed
 
 Verify the host change first. Then update known-hosts through the UI or by reconnecting as appropriate.
+
+### SSHFS mount fails with `fuse: device not found`
+
+A remote-source backup in SSHFS pull mode fails immediately with
+`backend.errors.service.failedPrepareSourcePaths`, and the container log shows
+`SSHFS mount failed: fuse: device not found, try 'modprobe fuse' first` or
+`fusermount3: mount failed: Operation not permitted`.
+
+The container has no FUSE access. Add `/dev/fuse`, `SYS_ADMIN` and the AppArmor
+exception from [Optional FUSE Access](installation#optional-fuse-access) to the
+Borg UI service, make sure `/dev/fuse` exists on the host (`ls -l /dev/fuse`;
+if it is missing, `modprobe fuse`), and recreate the container.
+On Ubuntu the AppArmor line is the one that matters: the `docker-default`
+profile denies `fusermount3` even when the device and capability are present.
+If you would rather not widen the container's privileges, use
+[Remote Direct Backup](#remote-direct-backups) mode, which needs none of this.
