@@ -25,6 +25,7 @@ from app.core.agent_auth import (
     resolve_agent_from_token,
 )
 from app.core.agent_constants import DEFAULT_AGENT_POLL_INTERVAL_SECONDS
+from app.core.borg_errors import is_borg_warning_exit_code
 from app.core.security import get_password_hash, verify_password
 from app.database.database import get_db
 from app.database.models import (
@@ -60,18 +61,6 @@ FINAL_AGENT_JOB_STATUSES = {
     "failed",
     "canceled",
 }
-
-
-def _is_borg_warning_return_code(return_code: Any) -> bool:
-    """Borg's warning exit codes: legacy rc 1, modern range 100-127.
-
-    Same classification the server-side services apply to their own borg
-    processes - the agent path finally speaks it too instead of collapsing
-    every non-zero exit into "failed".
-    """
-    return isinstance(return_code, int) and (
-        return_code == 1 or 100 <= return_code <= 127
-    )
 
 
 STALE_AGENT_JOB_REQUEUE_AFTER = timedelta(minutes=15)
@@ -619,7 +608,7 @@ def _complete_agent_job(
     if job.status in FINAL_AGENT_JOB_STATUSES:
         return
     return_code = result.get("return_code") if isinstance(result, dict) else None
-    warning = _is_borg_warning_return_code(return_code)
+    warning = is_borg_warning_exit_code(return_code)
     if isinstance(return_code, int) and return_code != 0 and not warning:
         # A completion report carrying an explicit borg *error* code is a
         # failure, no matter which transport delivered it - the server is
