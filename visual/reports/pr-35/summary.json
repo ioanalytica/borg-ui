@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-08-31T15:28:22.279Z",
+  "generatedAt": "2026-09-01T16:09:26.899Z",
   "reportUrl": "",
   "metadata": {
     "title": "PR #35 visual report",
-    "commitSha": "262f29dfe385",
-    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/33408027165"
+    "commitSha": "654e37100c0b",
+    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/33529492851"
   },
   "totals": {
     "baseline": 474,
