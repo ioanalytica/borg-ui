@@ -1,40 +1,21 @@
 {
-  "generatedAt": "2026-09-01T16:09:26.899Z",
+  "generatedAt": "2026-09-02T10:59:10.144Z",
   "reportUrl": "",
   "metadata": {
     "title": "PR #35 visual report",
-    "commitSha": "654e37100c0b",
-    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/33529492851"
+    "commitSha": "5f53edcb916a",
+    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/33621387550"
   },
   "totals": {
     "baseline": 474,
     "actual": 474,
     "compared": 474,
-    "changed": 1,
+    "changed": 0,
     "added": 0,
     "removed": 0,
-    "unchanged": 473
+    "unchanged": 474
   },
-  "changed": [
-    {
-      "fileName": "components-diagnosticstcptargetfields--expanded-with-invalid-port.png",
-      "baselinePath": "images/baseline/components-diagnosticstcptargetfields--expanded-with-invalid-port.png",
-      "actualPath": "images/actual/components-diagnosticstcptargetfields--expanded-with-invalid-port.png",
-      "diffPath": "images/diff/components-diagnosticstcptargetfields--expanded-with-invalid-port.png",
-      "diffPixels": 945692,
-      "totalPixels": 1024000,
-      "diffRatio": 0.92352734375,
-      "dimensionsChanged": false,
-      "baseline": {
-        "width": 1280,
-        "height": 800
-      },
-      "actual": {
-        "width": 1280,
-        "height": 800
-      }
-    }
-  ],
+  "changed": [],
   "added": [],
   "removed": [],
   "unchanged": [
@@ -57,6 +38,12 @@
       "fileName": "backup-plans-reviewstep--docker-container-source-to-server-repo.png"
     },
     {
+      "fileName": "backup-plans-reviewstep--remote-direct-execution--mobile.png"
+    },
+    {
+      "fileName": "backup-plans-reviewstep--remote-direct-execution.png"
+    },
+    {
       "fileName": "backup-plans-reviewstep--scheduled-upload-policies--mobile.png"
     },
     {
@@ -67,12 +54,6 @@
     },
     {
       "fileName": "backup-plans-reviewstep--server-source-to-server-repo.png"
-    },
-    {
-      "fileName": "backup-plans-reviewstep--ssh-source-to-same-ssh-repo--mobile.png"
-    },
-    {
-      "fileName": "backup-plans-reviewstep--ssh-source-to-same-ssh-repo.png"
     },
     {
       "fileName": "backup-plans-reviewstep--unsupported-different-agent-source--mobile.png"
@@ -568,6 +549,9 @@
     },
     {
       "fileName": "components-diagnosticstcptargetfields--expanded-with-invalid-port--mobile.png"
+    },
+    {
+      "fileName": "components-diagnosticstcptargetfields--expanded-with-invalid-port.png"
     },
     {
       "fileName": "components-emptystatecard--cloud-storage-no-match-fallback--mobile.png"
