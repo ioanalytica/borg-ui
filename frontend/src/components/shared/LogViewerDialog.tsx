@@ -162,6 +162,8 @@ function getTypeLabel(type: string, t: (key: string) => string): string {
       return t('logViewer.typeRcloneHydrate')
     case 'script_execution':
       return t('logViewer.typeScript')
+    case 'repository_operation':
+      return t('logViewer.typeRepositoryOperation')
     default:
       return type.charAt(0).toUpperCase() + type.slice(1)
   }

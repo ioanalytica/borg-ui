@@ -1851,6 +1851,7 @@
         "rcloneSync": "Cloud Sync",
         "rcloneHydrate": "Cloud Hydrate",
         "scriptExecution": "Script",
+        "repositoryOperation": "Repository operation",
         "availabilityCheck": "Availability check"
       },
       "statuses": {
@@ -2913,7 +2914,8 @@
       "rcloneSync": "Cloud Sync",
       "rcloneHydrate": "Cloud Hydrate",
       "scriptExecution": "Script",
-      "availabilityCheck": "Availability check"
+      "availabilityCheck": "Availability check",
+      "repositoryOperation": "Repository operation"
     },
     "scheduledById": "Scheduled (ID: {{id}})",
     "backupPlanByName": "Backup Plan: {{name}}",
@@ -5010,7 +5012,8 @@
     "typePackage": "Package",
     "typeRcloneSync": "Cloud Sync",
     "typeRcloneHydrate": "Cloud Hydrate",
-    "typeScript": "Script"
+    "typeScript": "Script",
+    "typeRepositoryOperation": "Repository operation"
   },
   "mounts": {
     "columns": {

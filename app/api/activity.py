@@ -4,8 +4,9 @@ Activity feed API endpoints.
 Provides a unified view of all operations (backups, restores, checks, compacts, package installs).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Any, List, Optional
 from datetime import datetime
@@ -62,6 +63,97 @@ def _get_agent_log_lines(db: Session, agent_job_id: int) -> list[str]:
         .all()
     )
     return [log.message for log in logs]
+
+
+# Repository-operation kinds that maintain a linked *_jobs row and therefore
+# already surface through that row's own activity lane.
+_LINKED_REPOSITORY_OPERATION_KINDS = (
+    "repository.check",
+    "repository.prune",
+    "repository.compact",
+    "repository.rclone_sync",
+)
+
+
+def _repository_operation_lane_filters():
+    """The lane's shared predicate: unsuccessful, unlinked repository
+    operations. The log routes reuse it so they cannot reach anything the
+    lane excludes (successful runs, backup-linked jobs with their own
+    log-visibility gate, maintenance/cloud-sync runs with their own lanes).
+    """
+    return (
+        AgentJob.job_type == "repository",
+        AgentJob.backup_job_id.is_(None),
+        func.coalesce(AgentJob.payload["job_kind"].as_string(), "").notin_(
+            _LINKED_REPOSITORY_OPERATION_KINDS
+        ),
+        AgentJob.status.in_(("failed", "completed_with_warnings")),
+    )
+
+
+def _get_repository_operation_agent_job(db: Session, job_id: int) -> AgentJob:
+    agent_job = (
+        db.query(AgentJob)
+        .filter(AgentJob.id == job_id, *_repository_operation_lane_filters())
+        .first()
+    )
+    if not agent_job:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "key": "backend.errors.activity.jobNotFound",
+                "params": {"jobType": "repository_operation"},
+            },
+        )
+    return agent_job
+
+
+def _paginated_repository_operation_logs(
+    db: Session, agent_job: AgentJob, offset: int, limit: int
+) -> dict:
+    """One page of the streamed agent log rows, paginated in SQL so a page
+    request never loads the whole log. Jobs that streamed nothing fall back
+    to the error message; full-log assembly stays download-only."""
+    logs_query = (
+        db.query(AgentJobLog.message)
+        .filter(AgentJobLog.agent_job_id == agent_job.id)
+        .order_by(AgentJobLog.sequence.asc(), AgentJobLog.id.asc())
+    )
+    total_lines = logs_query.count()
+    if total_lines == 0:
+        fallback = agent_job.error_message or ""
+        if not fallback.strip():
+            raise _no_logs_available_exception()
+        return _paginate_log_text(fallback, offset, limit)
+    rows = logs_query.offset(offset).limit(limit).all()
+    end_offset = min(offset + limit, total_lines)
+    return {
+        "lines": [
+            {"line_number": offset + i + 1, "content": row[0]}
+            for i, row in enumerate(rows)
+        ],
+        "total_lines": total_lines,
+        "has_more": end_offset < total_lines,
+    }
+
+
+def _ensure_repository_operation_logs_visible(agent_job: AgentJob, db: Session) -> None:
+    """The shared log-save policy, applied like in every other lane: under
+    failed_only, a completed-with-warnings operation hides its logs."""
+    if not job_has_logs_by_policy(
+        agent_job,
+        get_log_save_policy(db),
+        output_text=[agent_job.error_message],
+    ):
+        raise _no_logs_available_exception()
+
+
+def _repository_operation_log_text(db: Session, agent_job: AgentJob) -> str:
+    """The agent's streamed log lines, falling back to the error message."""
+    log_text = "\n".join(_get_agent_log_lines(db, agent_job.id))
+    if not log_text.strip() and agent_job.error_message:
+        log_text = agent_job.error_message
+    return log_text
 
 
 class ActivityItem(BaseModel):
@@ -704,6 +796,71 @@ async def list_recent_activity(
                 }
             )
 
+    # Repository-operation agent jobs (archive listings, repo info, browse,
+    # break-lock, ...) have no linked *_jobs row, so no other lane surfaces
+    # them. Only unsuccessful runs are listed: the periodic stats refresh
+    # alone would add hundreds of success entries a day, and a successful
+    # operation is visible through its effect anyway.
+    if (not job_type or job_type == "repository_operation") and (
+        not status or status in ("failed", "completed_with_warnings")
+    ):
+        operation_query = db.query(AgentJob).filter(
+            *_repository_operation_lane_filters()
+        )
+        if status:
+            operation_query = operation_query.filter(AgentJob.status == status)
+        operation_jobs = operation_query.order_by(AgentJob.id.desc()).limit(limit).all()
+        operation_ids_with_logs: set[int] = set()
+        if operation_jobs:
+            operation_ids_with_logs = {
+                row[0]
+                for row in db.query(AgentJobLog.agent_job_id)
+                .filter(
+                    AgentJobLog.agent_job_id.in_([job.id for job in operation_jobs])
+                )
+                .distinct()
+                .all()
+            }
+        for job in operation_jobs:
+            payload = job.payload if isinstance(job.payload, dict) else {}
+            repository_ref = payload.get("repository")
+            repository_ref = repository_ref if isinstance(repository_ref, dict) else {}
+            repo = None
+            if repository_ref.get("id") is not None:
+                repo = (
+                    db.query(Repository)
+                    .filter(Repository.id == repository_ref["id"])
+                    .first()
+                )
+            repo_path = repo.path if repo else repository_ref.get("path")
+            activities.append(
+                {
+                    "id": job.id,
+                    "type": "repository_operation",
+                    "status": job.status,
+                    "started_at": job.started_at,
+                    "completed_at": job.completed_at,
+                    "error_message": job.error_message,
+                    "repository": repo.name if repo else repo_path,
+                    "repository_path": repo_path,
+                    "log_file_path": None,
+                    "schedule_id": None,
+                    # The operation kind renders in the detail column, the
+                    # same way script executions reuse this field.
+                    "archive_name": payload.get("job_kind") or job.job_type,
+                    "package_name": None,
+                    "has_logs": (
+                        job.id in operation_ids_with_logs or bool(job.error_message)
+                    )
+                    and job_has_logs_by_policy(
+                        job,
+                        log_save_policy,
+                        output_text=[job.error_message],
+                    ),
+                    "_sort_at": job.started_at or job.created_at,
+                }
+            )
+
     # Fetch package install jobs
     if not job_type or job_type == "package":
         package_jobs = (
@@ -869,8 +1026,10 @@ async def list_recent_activity(
 async def get_job_logs(
     job_type: str,
     job_id: int,
-    offset: int = 0,
-    limit: int = 500,  # Default to 500 lines per request
+    offset: int = Query(default=0, ge=0),
+    # Cap the page size at the documented 500 lines - the repository-operation
+    # lane passes it straight into a SQL LIMIT.
+    limit: int = Query(default=500, ge=1, le=500),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -914,6 +1073,11 @@ async def get_job_logs(
         else:
             log_text = _format_script_execution_logs(execution)
         return _paginate_log_text(log_text, offset, limit)
+
+    if job_type == "repository_operation":
+        agent_job = _get_repository_operation_agent_job(db, job_id)
+        _ensure_repository_operation_logs_visible(agent_job, db)
+        return _paginated_repository_operation_logs(db, agent_job, offset, limit)
 
     if job_type in RCLONE_ACTIVITY_OPERATIONS:
         job = _get_rclone_job(db, job_type, job_id)
@@ -1231,6 +1395,17 @@ async def download_job_logs(
             )
         _ensure_activity_logs_visible(job_type, execution, db)
         log_text = _format_script_execution_logs(execution)
+        if not log_text.strip():
+            raise _no_logs_available_exception()
+        return _text_download_response(
+            log_text,
+            filename=f"{job_type}_job_{job_id}_logs.txt",
+        )
+
+    if job_type == "repository_operation":
+        agent_job = _get_repository_operation_agent_job(db, job_id)
+        _ensure_repository_operation_logs_visible(agent_job, db)
+        log_text = _repository_operation_log_text(db, agent_job)
         if not log_text.strip():
             raise _no_logs_available_exception()
         return _text_download_response(

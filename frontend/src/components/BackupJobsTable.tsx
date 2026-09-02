@@ -117,6 +117,8 @@ const getTypeLabel = (type: string, t: (key: string) => string): string => {
       return t('backupJobsTable.types.scriptExecution')
     case 'availability_check':
       return t('backupJobsTable.types.availabilityCheck')
+    case 'repository_operation':
+      return t('backupJobsTable.types.repositoryOperation')
     default:
       return type
   }
@@ -148,6 +150,8 @@ const getTypeColor = (
       return 'secondary'
     case 'availability_check':
       return 'default'
+    case 'repository_operation':
+      return 'info'
     default:
       return 'default'
   }

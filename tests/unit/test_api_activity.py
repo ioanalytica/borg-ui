@@ -2173,3 +2173,252 @@ class TestGetJobLogsPlaceholderOffset:
         assert data["lines"][0]["content"] == "Creating archive..."
         assert data["lines"][1]["content"] == "Files: 100 new, 0 changed"
         assert data["lines"][2]["content"] == "Duration: 2.34 seconds"
+
+
+@pytest.mark.unit
+class TestRepositoryOperationLane:
+    def _agent(self, test_db):
+        from app.database.models import AgentMachine
+
+        agent = AgentMachine(
+            name="lane-agent",
+            agent_id="agt_lane",
+            token_hash="hash",
+            token_prefix="prefix",
+            status="online",
+        )
+        test_db.add(agent)
+        test_db.flush()
+        return agent
+
+    def _operation_job(self, test_db, agent, repo, **overrides):
+        from app.database.models import AgentJob
+
+        fields = {
+            "agent_machine_id": agent.id,
+            "job_type": "repository",
+            "status": "failed",
+            "error_message": "repository.list_archives exited with code 2",
+            "started_at": datetime(2026, 9, 2, 10, 4, 50),
+            "completed_at": datetime(2026, 9, 2, 10, 4, 53),
+            "payload": {
+                "schema_version": 1,
+                "job_kind": "repository.list_archives",
+                "repository": {"id": repo.id, "path": repo.path},
+            },
+        }
+        fields.update(overrides)
+        job = AgentJob(**fields)
+        test_db.add(job)
+        test_db.flush()
+        return job
+
+    def test_failed_repository_operations_surface_with_logs(
+        self, test_client, admin_headers, test_db
+    ):
+        from app.database.models import AgentJobLog, BackupJob
+
+        repo = _create_activity_repository(test_db, name="Lane Repo")
+        agent = self._agent(test_db)
+
+        failed = self._operation_job(test_db, agent, repo)
+        test_db.add(
+            AgentJobLog(
+                agent_job_id=failed.id,
+                sequence=0,
+                stream="stderr",
+                message="Failed to create/acquire the lock (timeout).",
+                created_at=datetime(2026, 9, 2, 10, 4, 52),
+            )
+        )
+        # None of these may appear: a successful operation, a maintenance run
+        # (surfaces via its linked check job), and an agent backup (surfaces
+        # via its linked backup job).
+        self._operation_job(test_db, agent, repo, status="completed")
+        self._operation_job(
+            test_db,
+            agent,
+            repo,
+            payload={
+                "schema_version": 1,
+                "job_kind": "repository.check",
+                "repository": {"id": repo.id, "path": repo.path},
+                "operation": {"maintenance_job": {"kind": "check", "id": 1}},
+            },
+        )
+        backup_row = BackupJob(repository=repo.path, status="failed")
+        test_db.add(backup_row)
+        test_db.flush()
+        self._operation_job(test_db, agent, repo, backup_job_id=backup_row.id)
+        test_db.commit()
+
+        response = test_client.get(
+            "/api/activity/recent?job_type=repository_operation",
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 200
+        items = response.json()
+        assert [item["id"] for item in items] == [failed.id]
+        item = items[0]
+        assert item["type"] == "repository_operation"
+        assert item["status"] == "failed"
+        assert item["repository"] == "Lane Repo"
+        assert item["archive_name"] == "repository.list_archives"
+        assert item["has_logs"] is True
+
+        logs = test_client.get(
+            f"/api/activity/repository_operation/{failed.id}/logs",
+            headers=admin_headers,
+        )
+        assert logs.status_code == 200
+        assert any(
+            "Failed to create/acquire the lock" in line["content"]
+            for line in logs.json()["lines"]
+        )
+
+    def test_success_status_filter_skips_the_lane(
+        self, test_client, admin_headers, test_db
+    ):
+        repo = _create_activity_repository(test_db, name="Lane Repo Filter")
+        agent = self._agent(test_db)
+        self._operation_job(test_db, agent, repo, status="completed")
+        self._operation_job(test_db, agent, repo)
+        test_db.commit()
+
+        response = test_client.get(
+            "/api/activity/recent?status=completed", headers=admin_headers
+        )
+
+        assert response.status_code == 200
+        assert not [
+            item for item in response.json() if item["type"] == "repository_operation"
+        ]
+
+    def test_log_routes_reject_jobs_the_lane_excludes(
+        self, test_client, admin_headers, test_db
+    ):
+        """The log endpoints share the lane predicate: excluded jobs
+        (successful runs, maintenance runs, backup-linked jobs with their own
+        log-visibility gate) must 404 instead of exposing their logs here."""
+        from app.database.models import BackupJob
+
+        repo = _create_activity_repository(test_db, name="Lane Guard Repo")
+        agent = self._agent(test_db)
+        completed = self._operation_job(test_db, agent, repo, status="completed")
+        maintenance = self._operation_job(
+            test_db,
+            agent,
+            repo,
+            payload={
+                "schema_version": 1,
+                "job_kind": "repository.check",
+                "repository": {"id": repo.id, "path": repo.path},
+                "operation": {"maintenance_job": {"kind": "check", "id": 1}},
+            },
+        )
+        backup_row = BackupJob(repository=repo.path, status="failed")
+        test_db.add(backup_row)
+        test_db.flush()
+        backup_linked = self._operation_job(
+            test_db, agent, repo, backup_job_id=backup_row.id
+        )
+        test_db.commit()
+
+        for job_id in (completed.id, maintenance.id, backup_linked.id):
+            for route in ("logs", "logs/download"):
+                response = test_client.get(
+                    f"/api/activity/repository_operation/{job_id}/{route}",
+                    headers=admin_headers,
+                )
+                assert response.status_code == 404
+
+    def test_log_view_paginates_in_sql(self, test_client, admin_headers, test_db):
+        from app.database.models import AgentJobLog
+
+        repo = _create_activity_repository(test_db, name="Lane Paging Repo")
+        agent = self._agent(test_db)
+        job = self._operation_job(test_db, agent, repo)
+        test_db.add_all(
+            AgentJobLog(
+                agent_job_id=job.id,
+                sequence=i,
+                stream="stdout",
+                message=f"line-{i}",
+                created_at=datetime(2026, 9, 2, 10, 4, 50),
+            )
+            for i in range(7)
+        )
+        test_db.commit()
+
+        response = test_client.get(
+            f"/api/activity/repository_operation/{job.id}/logs?offset=2&limit=3",
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert [line["content"] for line in body["lines"]] == [
+            "line-2",
+            "line-3",
+            "line-4",
+        ]
+        assert [line["line_number"] for line in body["lines"]] == [3, 4, 5]
+        assert body["total_lines"] == 7
+        assert body["has_more"] is True
+
+    def test_failed_only_policy_hides_warning_operation_logs(
+        self, test_client, admin_headers, test_db
+    ):
+        """The lane honors the shared log-save policy: under failed_only a
+        completed-with-warnings operation hides its logs, a failed one stays
+        visible."""
+        from app.database.models import AgentJobLog
+
+        _set_log_save_policy(test_db, "failed_only")
+        repo = _create_activity_repository(test_db, name="Lane Policy Repo")
+        agent = self._agent(test_db)
+        warning_job = self._operation_job(
+            test_db, agent, repo, status="completed_with_warnings"
+        )
+        failed_job = self._operation_job(test_db, agent, repo)
+        test_db.add(
+            AgentJobLog(
+                agent_job_id=warning_job.id,
+                sequence=0,
+                stream="stderr",
+                message="borg warning output",
+                created_at=datetime(2026, 9, 2, 10, 4, 52),
+            )
+        )
+        test_db.commit()
+
+        response = test_client.get(
+            "/api/activity/recent?job_type=repository_operation",
+            headers=admin_headers,
+        )
+        assert response.status_code == 200
+        by_id = {item["id"]: item for item in response.json()}
+        assert by_id[warning_job.id]["has_logs"] is False
+        assert by_id[failed_job.id]["has_logs"] is True
+
+        hidden = test_client.get(
+            f"/api/activity/repository_operation/{warning_job.id}/logs",
+            headers=admin_headers,
+        )
+        assert hidden.status_code == 404
+
+    def test_log_pagination_inputs_are_validated(
+        self, test_client, admin_headers, test_db
+    ):
+        repo = _create_activity_repository(test_db, name="Lane Validate Repo")
+        agent = self._agent(test_db)
+        job = self._operation_job(test_db, agent, repo)
+        test_db.commit()
+
+        for query in ("limit=9999", "limit=0", "offset=-1"):
+            response = test_client.get(
+                f"/api/activity/repository_operation/{job.id}/logs?{query}",
+                headers=admin_headers,
+            )
+            assert response.status_code == 422

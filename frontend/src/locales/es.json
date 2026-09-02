@@ -1851,6 +1851,7 @@
         "rcloneSync": "Sincronización en la nube",
         "rcloneHydrate": "Hidratación en la nube",
         "scriptExecution": "Script",
+        "repositoryOperation": "Operación de repositorio",
         "availabilityCheck": "Comprobación de disponibilidad"
       },
       "statuses": {
@@ -2913,7 +2914,8 @@
       "rcloneSync": "Sincronización en la nube",
       "rcloneHydrate": "Hidratación en la nube",
       "scriptExecution": "Script",
-      "availabilityCheck": "Comprobación de disponibilidad"
+      "availabilityCheck": "Comprobación de disponibilidad",
+      "repositoryOperation": "Operación de repositorio"
     },
     "scheduledById": "Programado (ID: {{id}})",
     "backupPlanByName": "Plan de copia: {{name}}",
@@ -5013,7 +5015,8 @@
     "typePackage": "Paquete",
     "typeRcloneSync": "Sincronización en la nube",
     "typeRcloneHydrate": "Hidratación en la nube",
-    "typeScript": "Script"
+    "typeScript": "Script",
+    "typeRepositoryOperation": "Operación de repositorio"
   },
   "mounts": {
     "columns": {
