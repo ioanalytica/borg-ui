@@ -1,3 +1,5 @@
+import re
+
 from app.utils.archive_names import sanitize_archive_component, build_archive_name
 
 
@@ -191,3 +193,46 @@ class TestBuildArchiveName:
             stable_series=True,
         )
         assert result == "nightly-plan-primary-repo"
+
+
+class TestUtcnowPlaceholder:
+    def test_utcnow_expands_to_a_utc_timestamp(self):
+        result = build_archive_name(
+            job_name="my job",
+            repo_name=None,
+            template="{job_name}-{utcnow}",
+            timestamp="2025-01-01T12:00:00",
+        )
+        assert "{utcnow}" not in result
+        assert re.fullmatch(r"my-job-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}", result)
+
+    def test_utcnow_and_now_can_coexist(self):
+        result = build_archive_name(
+            job_name="job",
+            repo_name=None,
+            template="{now}-vs-{utcnow}",
+            timestamp="2025-01-01T12:00:00",
+        )
+        assert result.startswith("2025-01-01T12:00:00-vs-")
+        assert "{utcnow}" not in result
+
+    def test_formatted_utcnow_passes_through_for_borg(self):
+        # {utcnow:%Y-%m-%d} is borg's own placeholder syntax - left for borg
+        # to expand, exactly like formatted {now:...} today.
+        result = build_archive_name(
+            job_name="job",
+            repo_name=None,
+            template="{job_name}-{utcnow:%Y-%m-%d}",
+            timestamp="2025-01-01T12:00:00",
+        )
+        assert result == "job-{utcnow:%Y-%m-%d}"
+
+    def test_stable_series_strips_utcnow(self):
+        result = build_archive_name(
+            job_name="job",
+            repo_name=None,
+            template="{job_name}-{utcnow}",
+            timestamp="2025-01-01T12:00:00",
+            stable_series=True,
+        )
+        assert result == "job"

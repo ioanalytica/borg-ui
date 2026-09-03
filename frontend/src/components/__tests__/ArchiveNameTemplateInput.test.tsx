@@ -30,7 +30,9 @@ describe('ArchiveNameTemplateInput', () => {
     render(<ArchiveNameTemplateInput {...defaultProps} />)
 
     expect(
-      screen.getByText(/Available placeholders: {job_name}, {now}, {date}, {time}, {timestamp}/i)
+      screen.getByText(
+        /Available placeholders: {job_name}, {now}, {utcnow}, {date}, {time}, {timestamp}/i
+      )
     ).toBeInTheDocument()
   })
 
@@ -96,6 +98,22 @@ describe('ArchiveNameTemplateInput', () => {
     // Now format should be ISO string with replacements
     const preview = screen.getByText(/\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}/)
     expect(preview).toBeInTheDocument()
+  })
+
+  it('generates preview with utcnow placeholder', () => {
+    // Frozen clock: assert the exact UTC value with millisecond precision,
+    // not just the shape - local rendering would produce a different string.
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-02T03:04:05.678Z'))
+    try {
+      render(<ArchiveNameTemplateInput value="{utcnow}" onChange={vi.fn()} />)
+
+      const preview = screen.getByText(/2026-01-02T03-04-05-678/)
+      expect(preview).toBeInTheDocument()
+      expect(preview.textContent).not.toContain('{utcnow}')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('generates preview with multiple placeholders', () => {
