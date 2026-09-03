@@ -47,6 +47,30 @@ if settings.database_url.startswith("sqlite"):
         cursor.close()
 
 
+def _set_utc_session_timezone(dbapi_conn, connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("SET TIME ZONE 'UTC'")
+    cursor.close()
+
+
+def register_utc_session_timezone(target_engine) -> None:
+    """Pin the session timezone to UTC on PostgreSQL connections.
+
+    Datetime columns store naive UTC. An aware value written to
+    `timestamp without time zone` is converted through the SESSION zone
+    before the offset is stripped - correct only while that zone is UTC.
+    Pinning it here makes the convention hold by construction instead of
+    by the server's or environment's default. No-op on SQLite, whose
+    storage never consults a session zone.
+    """
+    if target_engine.dialect.name != "postgresql":
+        return
+    event.listen(target_engine, "connect", _set_utc_session_timezone)
+
+
+register_utc_session_timezone(engine)
+
+
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
