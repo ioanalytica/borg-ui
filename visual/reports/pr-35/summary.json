@@ -1,27 +1,43 @@
 {
-  "generatedAt": "2026-09-02T10:59:10.144Z",
+  "generatedAt": "2026-09-03T09:41:58.497Z",
   "reportUrl": "",
   "metadata": {
     "title": "PR #35 visual report",
-    "commitSha": "5f53edcb916a",
-    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/33621387550"
+    "commitSha": "70c51a54fbee",
+    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/33739484452"
   },
   "totals": {
     "baseline": 474,
     "actual": 474,
     "compared": 474,
-    "changed": 0,
+    "changed": 1,
     "added": 0,
     "removed": 0,
-    "unchanged": 474
+    "unchanged": 473
   },
-  "changed": [],
+  "changed": [
+    {
+      "fileName": "backup-plans-reviewstep--agent-source-to-same-agent-repo--mobile.png",
+      "baselinePath": "images/baseline/backup-plans-reviewstep--agent-source-to-same-agent-repo--mobile.png",
+      "actualPath": "images/actual/backup-plans-reviewstep--agent-source-to-same-agent-repo--mobile.png",
+      "diffPath": "images/diff/backup-plans-reviewstep--agent-source-to-same-agent-repo--mobile.png",
+      "diffPixels": 329160,
+      "totalPixels": 329160,
+      "diffRatio": 1,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 390,
+        "height": 844
+      },
+      "actual": {
+        "width": 390,
+        "height": 844
+      }
+    }
+  ],
   "added": [],
   "removed": [],
   "unchanged": [
-    {
-      "fileName": "backup-plans-reviewstep--agent-source-to-same-agent-repo--mobile.png"
-    },
     {
       "fileName": "backup-plans-reviewstep--agent-source-to-same-agent-repo.png"
     },
