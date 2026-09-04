@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-04T12:45:48.732Z",
+  "generatedAt": "2026-09-04T13:47:01.258Z",
   "reportUrl": "",
   "metadata": {
     "title": "PR #46 visual report",
@@ -10,31 +10,12 @@
     "baseline": 510,
     "actual": 510,
     "compared": 510,
-    "changed": 1,
+    "changed": 0,
     "added": 0,
     "removed": 0,
-    "unchanged": 509
+    "unchanged": 510
   },
-  "changed": [
-    {
-      "fileName": "backup-plans-sourcestep--btrfs-snapshot-source--mobile.png",
-      "baselinePath": "images/baseline/backup-plans-sourcestep--btrfs-snapshot-source--mobile.png",
-      "actualPath": "images/actual/backup-plans-sourcestep--btrfs-snapshot-source--mobile.png",
-      "diffPath": "images/diff/backup-plans-sourcestep--btrfs-snapshot-source--mobile.png",
-      "diffPixels": 318694,
-      "totalPixels": 329160,
-      "diffRatio": 0.9682039129906429,
-      "dimensionsChanged": false,
-      "baseline": {
-        "width": 390,
-        "height": 844
-      },
-      "actual": {
-        "width": 390,
-        "height": 844
-      }
-    }
-  ],
+  "changed": [],
   "added": [],
   "removed": [],
   "unchanged": [
@@ -325,6 +306,9 @@
     },
     {
       "fileName": "backup-plans-sourceselectiondialog--path-picker-with-local-selections.png"
+    },
+    {
+      "fileName": "backup-plans-sourcestep--btrfs-snapshot-source--mobile.png"
     },
     {
       "fileName": "backup-plans-sourcestep--btrfs-snapshot-source.png"
