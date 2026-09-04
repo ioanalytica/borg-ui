@@ -806,3 +806,24 @@ class TestWideCompareWindow:
 
         assert r.status_code == 200
         assert {c["path"] for c in r.json()["changes"]} == {"a"}
+
+
+@pytest.mark.unit
+def test_archive_changes_has_no_btree_index_on_the_unbounded_path():
+    """`path` is unbounded Text; a B-tree index on it makes the INSERT of a
+    change row for a long archived path fail (PostgreSQL entry-size limit).
+    archive_id keeps its own index; no index may cover the raw path column
+    (guards against re-introducing ix_archive_changes_path / _archive_path)."""
+    indexes = ArchiveChange.__table__.indexes
+    for index in indexes:
+        cols = [c.name for c in index.columns]
+        assert cols != ["path"], f"unbounded-path index re-added: {index.name}"
+        assert cols != ["archive_id", "path"], (
+            f"unbounded-path composite index re-added: {index.name}"
+        )
+    # archive_id stays indexed for per-archive reads.
+    assert any(
+        [c.name for c in idx.columns] == ["archive_id"] for idx in indexes
+    ) or any(
+        c.name == "archive_id" and c.index for c in ArchiveChange.__table__.columns
+    )
