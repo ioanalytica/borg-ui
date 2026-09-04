@@ -214,13 +214,15 @@ const Archives: React.FC = () => {
       repository_id,
       archive_name,
       mount_point,
+      archive_id,
     }: {
       repository_id: number
       archive_name: string
       mount_point?: string
+      archive_id?: string
       archive_start?: string
       is_custom_mount_point: boolean
-    }) => mountsAPI.mountBorgArchive({ repository_id, archive_name, mount_point }),
+    }) => mountsAPI.mountBorgArchive({ repository_id, archive_name, mount_point, archive_id }),
     onSuccess: (data, variables) => {
       const mountPoint = data.data.mount_point
       const containerName = 'borg-web-ui'
@@ -350,6 +352,8 @@ const Archives: React.FC = () => {
       mountArchiveMutation.mutate({
         repository_id: selectedRepositoryId,
         archive_name: mountDialogArchive.name,
+        // Borg 2 series archives share one name; the id addresses exactly one.
+        archive_id: mountDialogArchive.id || undefined,
         mount_point: customMountPoint || undefined,
         archive_start: mountDialogArchive.start,
         is_custom_mount_point: !!customMountPoint && customMountPoint !== defaultMountPoint,

@@ -298,6 +298,8 @@ describe('Archives page actions', () => {
       expect(apiModule.mountsAPI.mountBorgArchive).toHaveBeenCalledWith({
         repository_id: 1,
         archive_name: 'archive-1',
+        // Borg 2 series disambiguation: the id travels with the mount request.
+        archive_id: 'a1',
         mount_point: 'archive-1',
       })
     })
