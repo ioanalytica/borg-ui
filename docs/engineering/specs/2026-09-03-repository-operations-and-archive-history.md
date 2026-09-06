@@ -429,9 +429,16 @@ schedulers. It waits on an `asyncio.Event` that `enqueue()` sets, with a
 fallback poll every 5 seconds. Each tick:
 
 1. Load `queued` operations whose `depends_on_id` is null or points at a
-   `completed` or `completed_with_warnings` operation. If the dependency is
-   `failed`, `cancelled`, or `skipped`, mark the dependant `skipped` with
-   `skip_reason = "dependency_failed"` and continue down the chain.
+   `completed`, `completed_with_warnings`, or `skipped` operation. If the
+   dependency is `failed` or `cancelled`, mark the dependant `skipped` with
+   `skip_reason = "dependency_failed"` and continue down the chain. A
+   skip with `skip_reason = "dependency_failed"` propagates the same skip
+   to its dependants, preserving failure and cancellation through the whole
+   chain. Other skipped dependencies satisfy their dependants: skipping
+   means the stage had
+   nothing to do (agent without diff support, plan without history), not
+   that it broke, and `stats` must not wait behind a `history_index` it
+   does not use (#917).
 2. Order by `priority`, then `created_at`.
 3. For each candidate, check the lane and the global limits (7.3). Dispatch
    the first that fits, then re-evaluate. Stop when nothing fits.

@@ -3,6 +3,7 @@ Series inference follows spec 6.6 through `app.services.operations.series`.
 """
 
 import json
+import re
 from typing import Iterable, Optional, Sequence
 
 import structlog
@@ -228,6 +229,14 @@ def _info_stats(payload: str) -> Optional[dict]:
     }
 
 
+_UTC_OFFSET_SUFFIX = re.compile(r"(Z|[+-]\d{2}:?\d{2})$")
+
+
+def _carries_utc_offset(value: object) -> bool:
+    """True for ISO timestamps with an explicit offset (Borg 2 output)."""
+    return isinstance(value, str) and _UTC_OFFSET_SUFFIX.search(value) is not None
+
+
 def archives_needing_info(
     db: Session, repository: Repository, *, limit: int
 ) -> list[Archive]:
@@ -251,6 +260,76 @@ def archives_needing_info(
     )
 
 
+async def _agent_archive_info(
+    db: Session, repository: Repository, archive: Archive, *, timeout_seconds: int
+) -> Optional[dict]:
+    """Run `repository.archive_info` on the agent for one archive.
+
+    Borg 2 archives are addressed by `aid:<id>` so a series name never
+    resolves to a different archive; Borg 1 has no id selector.
+    """
+    from app.services.agent_job_dispatcher import dispatch_agent_job_best_effort
+    from app.services.repository_executor import (
+        queue_agent_repository_operation_job,
+        wait_for_agent_repository_operation_job,
+    )
+
+    ref = (
+        f"aid:{archive.borg_id}"
+        if (repository.borg_version or 1) == 2
+        else archive.name
+    )
+    job = queue_agent_repository_operation_job(
+        db, repository, job_kind="repository.archive_info", operation={"archive": ref}
+    )
+    await dispatch_agent_job_best_effort(
+        db, job, repository_id=repository.id, archive_name=ref
+    )
+    result = await wait_for_agent_repository_operation_job(
+        db, job.id, timeout_seconds=timeout_seconds
+    )
+    if not _agent_listing_ok(result):
+        return None
+    return {"success": True, "stdout": result.get("stdout") or ""}
+
+
+async def _server_archive_info(
+    repository: Repository, archive: Archive, env: dict
+) -> Optional[dict]:
+    remote_path = effective_repository_remote_path(repository)
+    # TZ=UTC so borg renders the archive end time in UTC (see stats env).
+    info_env = _repository_stats_borg_env(env or {})
+    if (repository.borg_version or 1) == 2:
+        from app.core.borg2 import borg2
+
+        return await run_serialized_repository_command(
+            repository.id,
+            lambda: borg2.info_archive(
+                repository.path,
+                f"aid:{archive.borg_id}",
+                passphrase=repository.passphrase,
+                remote_path=remote_path,
+                bypass_lock=repository.bypass_lock,
+                env=info_env,
+            ),
+            scope="metadata",
+        )
+    from app.core.borg import borg
+
+    return await run_serialized_repository_command(
+        repository.id,
+        lambda: borg.info_archive(
+            repository.path,
+            archive.name,
+            passphrase=repository.passphrase,
+            remote_path=remote_path,
+            bypass_lock=repository.bypass_lock,
+            env=info_env,
+        ),
+        scope="metadata",
+    )
+
+
 async def fill_archive_info(
     db: Session,
     repository: Repository,
@@ -259,45 +338,25 @@ async def fill_archive_info(
     *,
     limit: int,
 ) -> int:
-    """Run per-archive `borg info` for up to `limit` archives, oldest first."""
-    if is_agent_executor(repository) or limit <= 0:
+    """Run per-archive `borg info` for up to `limit` archives, oldest first.
+
+    Agent repositories go through the agent's `repository.archive_info` job;
+    the agent renders naive Borg 1 timestamps in its reported zone.
+    """
+    if limit <= 0:
         return 0
+    agent = is_agent_executor(repository)
+    timezone_name = agent_timezone_for_repository(db, repository) if agent else "UTC"
+    timeout_seconds = get_operation_timeouts(db)["info_timeout"] if agent else None
     filled = 0
-    remote_path = effective_repository_remote_path(repository)
-    # TZ=UTC so borg renders the archive end time in UTC (see stats env).
-    info_env = _repository_stats_borg_env(env or {})
     for archive in sorted(archives, key=lambda a: a.start)[:limit]:
         try:
-            if (repository.borg_version or 1) == 2:
-                from app.core.borg2 import borg2
-
-                result = await run_serialized_repository_command(
-                    repository.id,
-                    lambda archive=archive: borg2.info_archive(
-                        repository.path,
-                        f"aid:{archive.borg_id}",
-                        passphrase=repository.passphrase,
-                        remote_path=remote_path,
-                        bypass_lock=repository.bypass_lock,
-                        env=info_env,
-                    ),
-                    scope="metadata",
+            if agent:
+                result = await _agent_archive_info(
+                    db, repository, archive, timeout_seconds=timeout_seconds
                 )
             else:
-                from app.core.borg import borg
-
-                result = await run_serialized_repository_command(
-                    repository.id,
-                    lambda archive=archive: borg.info_archive(
-                        repository.path,
-                        archive.name,
-                        passphrase=repository.passphrase,
-                        remote_path=remote_path,
-                        bypass_lock=repository.bypass_lock,
-                        env=info_env,
-                    ),
-                    scope="metadata",
-                )
+                result = await _server_archive_info(repository, archive, env)
         except Exception as exc:
             logger.warning("archive info failed", archive=archive.name, error=str(exc))
             continue
@@ -310,9 +369,13 @@ async def fill_archive_info(
         archive.original_size = info["original_size"]
         archive.compressed_size = info["compressed_size"]
         archive.deduplicated_size = info["deduplicated_size"]
-        if info["end"]:
+        if info["end"] and (timezone_name or _carries_utc_offset(info["end"])):
+            # A naive end time from an agent that never reported its zone
+            # would be read in the server's zone; leave it unset instead.
             try:
-                archive.end = _parse_borg_archive_time(info["end"], timezone_name="UTC")
+                archive.end = _parse_borg_archive_time(
+                    info["end"], timezone_name=timezone_name
+                )
             except ValueError:
                 pass
         if info["duration"] is not None:

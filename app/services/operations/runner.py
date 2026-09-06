@@ -10,7 +10,7 @@ from typing import Optional
 import structlog
 from sqlalchemy.orm import Session
 
-from app.config import settings as app_settings
+import app.config as app_config
 from app.database.models import Operation, SystemSettings, utc_now
 from app.services.operations import executors as executor_registry
 from app.services.operations.enqueue import enqueue_chain
@@ -25,8 +25,34 @@ from app.utils.process_utils import is_process_alive
 
 logger = structlog.get_logger()
 
-_FAILED_DEPENDENCY_STATUSES = ("failed", "cancelled", "skipped")
-_OUTCOME_STATUSES = ("completed", "completed_with_warnings", "skipped", "failed")
+# An intentional skip lets dependants run, but a skip caused by a failed
+# dependency must propagate the failure through the remaining chain.
+# Executors that need a predecessor's result read it defensively.
+_FAILED_DEPENDENCY_STATUSES = ("failed", "cancelled")
+_SATISFIED_DEPENDENCY_STATUSES = SUCCESS_STATUSES | {"skipped"}
+_OUTCOME_STATUSES = (
+    "completed",
+    "completed_with_warnings",
+    "skipped",
+    "failed",
+    "deferred",
+)
+# An operation refused by the repository admission (another job holds the
+# repository) goes back to the queue instead of failing: the backup
+# follow-up listing is enqueued the instant the backup completes, while the
+# plan is still creating its prune job, so the lane check can run before the
+# prune row exists and admission then refuses the listing. Bounded, so a
+# repository that never frees up still ends in a visible failure.
+MAX_DEFERRALS = 20
+REPOSITORY_BUSY_KEY = "backend.errors.jobs.repositoryOperationActive"
+
+
+def repository_busy(exc: BaseException) -> bool:
+    """True for the admission's 409 (repositoryOperationActive)."""
+    if getattr(exc, "status_code", None) != 409:
+        return False
+    detail = getattr(exc, "detail", None)
+    return isinstance(detail, dict) and detail.get("key") == REPOSITORY_BUSY_KEY
 
 
 @dataclass
@@ -42,7 +68,7 @@ class Outcome:
 
 
 def operation_log_path(operation_id: int) -> Path:
-    return Path(app_settings.data_dir) / "logs" / f"operation_{operation_id}.log"
+    return Path(app_config.settings.data_dir) / "logs" / f"operation_{operation_id}.log"
 
 
 class OperationContext:
@@ -215,10 +241,14 @@ class OperationRunner:
                     if (
                         dependency is None
                         or dependency.status in _FAILED_DEPENDENCY_STATUSES
+                        or (
+                            dependency.status == "skipped"
+                            and dependency.skip_reason == "dependency_failed"
+                        )
                     ):
                         await self._skip(db, op, "dependency_failed")
                         continue
-                    if dependency.status not in SUCCESS_STATUSES:
+                    if dependency.status not in _SATISFIED_DEPENDENCY_STATUSES:
                         continue
                 if self._get_executor(op.kind) is None:
                     await self._skip(db, op, "executor_unavailable")
@@ -249,6 +279,7 @@ class OperationRunner:
     async def run_operation(self, operation_id: int) -> None:
         db: Session = self._session()
         ctx: Optional[OperationContext] = None
+        deferred = False
         try:
             op = db.get(Operation, operation_id)
             if op is None or op.status != "running":
@@ -265,13 +296,45 @@ class OperationRunner:
                 await broadcast_operation_updated(op, db)
                 raise
             except Exception as exc:
-                logger.exception("Operation failed", operation_id=op.id, kind=op.kind)
-                outcome = Outcome(
-                    status="failed",
-                    error_message=str(exc) or exc.__class__.__name__,
-                )
+                if repository_busy(exc):
+                    outcome = Outcome(status="deferred", error_message=str(exc))
+                else:
+                    logger.exception(
+                        "Operation failed", operation_id=op.id, kind=op.kind
+                    )
+                    outcome = Outcome(
+                        status="failed",
+                        error_message=str(exc) or exc.__class__.__name__,
+                    )
             if outcome is None:
                 outcome = Outcome()
+            if outcome.status == "deferred":
+                deferrals = int((op.params or {}).get("deferrals", 0)) + 1
+                if deferrals > MAX_DEFERRALS:
+                    outcome = Outcome(
+                        status="failed",
+                        error_message=(
+                            f"repository still busy after {MAX_DEFERRALS} attempts: "
+                            f"{outcome.error_message}"
+                        ),
+                    )
+                else:
+                    logger.info(
+                        "Operation deferred, repository busy",
+                        operation_id=op.id,
+                        kind=op.kind,
+                        deferrals=deferrals,
+                    )
+                    op.status = "queued"
+                    op.started_at = None
+                    op.error_message = None
+                    op.params = {**(op.params or {}), "deferrals": deferrals}
+                    db.commit()
+                    await broadcast_operation_updated(op, db)
+                    # no wake: the next attempt waits for the poll interval or
+                    # an event, so the deferrals are not burnt in a tight loop
+                    deferred = True
+                    return
             if operation_id in self.cancel_requested and outcome.status != "failed":
                 op.status = "cancelled"
             else:
@@ -306,7 +369,8 @@ class OperationRunner:
             db.close()
             self.running_tasks.pop(operation_id, None)
             self.cancel_requested.discard(operation_id)
-            self.wake()
+            if not deferred:
+                self.wake()
 
     # -- cancellation ----------------------------------------------------------
 

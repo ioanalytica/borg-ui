@@ -138,6 +138,32 @@ async def test_dependency_waits_for_success(db, repo, runner, registry):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_skipped_dependency_satisfies_dependants(db, repo, runner, registry):
+    """A skipped stage is not a failed one: `stats` behind a `history_index`
+    that had nothing to do still runs (#917)."""
+
+    async def skip(ctx):
+        return Outcome(status="skipped", skip_reason="agent_diff_unsupported")
+
+    async def ok(ctx):
+        return Outcome(result={"unique_csize": 1})
+
+    registry["history_index"] = skip
+    registry["stats"] = ok
+    chain = enqueue_chain(
+        db, ["history_index", "stats"], repository_id=repo.id, trigger="reconcile"
+    )
+    await _drain(runner)
+    db.expire_all()
+    first, second = (db.get(Operation, c.id) for c in chain)
+    assert first.status == "skipped"
+    assert first.skip_reason == "agent_diff_unsupported"
+    assert second.status == "completed"
+    assert second.result == {"unique_csize": 1}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_missing_executor_is_skipped(db, repo, runner, registry):
     op = enqueue(db, "history_index", repository_id=repo.id)
     await runner.tick()
@@ -323,6 +349,37 @@ async def test_progress_and_log(db, repo, runner, registry, tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_log_uses_current_settings_after_config_reload(
+    db, repo, runner, registry, tmp_path, monkeypatch
+):
+    import importlib
+
+    import app.config as config
+
+    # Restore the original settings object after exercising the real reload.
+    monkeypatch.setattr(config, "settings", config.settings)
+    importlib.reload(config)
+    current_dir = tmp_path / "reloaded"
+    monkeypatch.setattr(config.settings, "data_dir", str(current_dir))
+
+    async def work(ctx):
+        ctx.log("after reload")
+        return Outcome()
+
+    registry["stats"] = work
+    op = enqueue(db, "stats", repository_id=repo.id)
+    await _drain(runner)
+    db.expire_all()
+    op = db.get(Operation, op.id)
+    expected_path = current_dir / "logs" / f"operation_{op.id}.log"
+    assert op.status == "completed"
+    assert op.log_file_path == str(expected_path)
+    assert expected_path.read_text() == "after reload\n"
+    assert not (tmp_path / "logs" / f"operation_{op.id}.log").exists()
+
+
+@pytest.mark.unit
 def test_recover_on_startup(db, repo, runner, monkeypatch):
     idx = enqueue(db, "stats", repository_id=repo.id)
     idx.status = "running"
@@ -370,3 +427,139 @@ async def test_start_loop_dispatches_and_stops(db, repo, runner, registry):
     runner.stop()
     runner.wake()
     await asyncio.wait_for(task, timeout=2)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root_status", ["failed", "cancelled"])
+@pytest.mark.parametrize("length", [3, 4])
+async def test_dependency_failure_propagates_through_skipped_children(
+    db, repo, runner, registry, root_status, length
+):
+    executed = []
+
+    async def record(ctx):
+        executed.append(ctx.kind)
+        return Outcome()
+
+    kinds = ["archive_sync", "history_merge", "history_index", "stats"][:length]
+    registry.update({kind: record for kind in kinds})
+    chain = enqueue_chain(db, kinds, repository_id=repo.id, trigger="reconcile")
+    chain[0].status = root_status
+    db.commit()
+    await _drain(runner)
+    db.expire_all()
+    assert executed == []
+    for op in chain[1:]:
+        persisted = db.get(Operation, op.id)
+        assert persisted.status == "skipped"
+        assert persisted.skip_reason == "dependency_failed"
+        assert persisted.completed_at is not None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["agent_diff_unsupported", "plan_locked"])
+async def test_intentional_skip_in_chain_keeps_stats_runnable(
+    db, repo, runner, registry, reason
+):
+    async def ok(ctx):
+        return Outcome()
+
+    async def optional_stage(ctx):
+        return Outcome(status="skipped", skip_reason=reason)
+
+    registry.update(archive_sync=ok, history_index=optional_stage, stats=ok)
+    chain = enqueue_chain(
+        db,
+        ["archive_sync", "history_index", "stats"],
+        repository_id=repo.id,
+        trigger="reconcile",
+    )
+    await _drain(runner)
+    db.expire_all()
+    rows = [db.get(Operation, op.id) for op in chain]
+    assert [op.status for op in rows] == ["completed", "skipped", "completed"]
+    assert rows[1].skip_reason == reason
+    assert rows[2].skip_reason is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_repository_busy_defers_instead_of_failing(db, repo, runner, registry):
+    """Seen live: the follow-up listing is dispatched 45 ms before the plan
+    creates its prune job and admission refuses it with 409. The operation
+    goes back to the queue with a deferral count and runs on a later tick;
+    its dependants are untouched meanwhile."""
+    from fastapi import HTTPException
+
+    attempts = []
+
+    async def busy_then_done(ctx):
+        attempts.append(ctx.operation_id)
+        if len(attempts) == 1:
+            raise HTTPException(
+                status_code=409,
+                detail={"key": "backend.errors.jobs.repositoryOperationActive"},
+            )
+        return Outcome(result={"listed": 1})
+
+    registry["archive_sync"] = busy_then_done
+    registry["stats"] = lambda ctx: _done()
+    first = enqueue(db, "archive_sync", repository_id=repo.id)
+    child = enqueue(db, "stats", repository_id=repo.id, depends_on_id=first.id)
+    await runner.tick()
+    await asyncio.gather(*list(runner.running_tasks.values()), return_exceptions=True)
+    db.expire_all()
+    first = db.get(Operation, first.id)
+    assert first.status == "queued" and first.started_at is None
+    assert first.params["deferrals"] == 1 and first.error_message is None
+    assert db.get(Operation, child.id).status == "queued"
+    # a deferral does not wake the runner: no tight retry loop
+    assert not runner._event().is_set()
+
+    await _drain(runner)
+    db.expire_all()
+    assert db.get(Operation, first.id).status == "completed"
+    assert db.get(Operation, first.id).result == {"listed": 1}
+    assert db.get(Operation, child.id).status == "completed"
+    assert len(attempts) == 2
+
+
+async def _done():
+    return Outcome()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_repository_busy_fails_after_the_deferral_cap(db, repo, runner, registry):
+    from fastapi import HTTPException
+
+    from app.services.operations import runner as runner_module
+
+    async def always_busy(ctx):
+        raise HTTPException(
+            status_code=409,
+            detail={"key": "backend.errors.jobs.repositoryOperationActive"},
+        )
+
+    registry["archive_sync"] = always_busy
+    op = enqueue(db, "archive_sync", repository_id=repo.id)
+    await _drain(runner, rounds=runner_module.MAX_DEFERRALS + 5)
+    db.expire_all()
+    op = db.get(Operation, op.id)
+    assert op.status == "failed"
+    assert op.params["deferrals"] == runner_module.MAX_DEFERRALS
+    assert "still busy" in op.error_message
+
+    # any other exception, and a 409 without the admission key, still fail
+    # at once
+    async def other(ctx):
+        raise HTTPException(status_code=409, detail="something else")
+
+    registry["archive_sync"] = other
+    other_op = enqueue(db, "archive_sync", repository_id=repo.id)
+    await _drain(runner)
+    db.expire_all()
+    assert db.get(Operation, other_op.id).status == "failed"
+    assert (db.get(Operation, other_op.id).params or {}).get("deferrals") is None

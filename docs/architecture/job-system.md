@@ -161,8 +161,10 @@ Rules:
   run alongside.
 - Lower priority number runs first: manual and plan work at 0, scheduled at
   5, follow-ups at 10, reconcile at 20.
-- A failed, cancelled, or skipped operation skips everything that depends on
-  it with `skip_reason = dependency_failed`.
+- A failed or cancelled operation skips everything that depends on it with
+  `skip_reason = dependency_failed`, including every subsequent dependant
+  of that skip. An intentional skip means the stage had nothing to do, so
+  dependants (`stats` after an unsupported `history_index`) still run.
 - Follow-ups are created automatically when an operation succeeds. An
   import enqueues stats and archive listing.
 - The reconcile scheduler replaces the old stats refresh loop. Every
