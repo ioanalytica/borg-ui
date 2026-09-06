@@ -164,7 +164,13 @@ Rules:
 - A failed, cancelled, or skipped operation skips everything that depends on
   it with `skip_reason = dependency_failed`.
 - Follow-ups are created automatically when an operation succeeds. An
-  import enqueues stats and archive listing.
+  import enqueues stats and archive listing. A backup that completes through
+  the legacy backup paths (server or agent) enqueues the `backup` chain the
+  same way, so the archive index and `last_backup` follow within a runner
+  tick instead of waiting for the next reconcile run. Only a queued
+  `archive_sync` with no dependency or an already satisfied dependency
+  suppresses a duplicate listing. `history_merge` follows the listing on
+  every plan so removed archives leave the database as well.
 - The reconcile scheduler replaces the old stats refresh loop. Every
   `stats_refresh_interval_minutes` it enqueues an index run for each
   repository that has none queued or running. `0` disables it.

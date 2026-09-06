@@ -6,6 +6,7 @@ from app.database.models import (
     BackupJob,
     Base,
     CheckJob,
+    PruneJob,
     Repository,
     SystemSettings,
 )
@@ -175,3 +176,49 @@ def test_system_kind_has_no_lane(db, settings):
 def test_defaults_when_settings_row_missing(db, repo):
     op = enqueue(db, "stats", repository_id=repo.id)
     assert lanes.can_start(db, op, None) is True
+
+
+@pytest.mark.unit
+def test_bypass_does_not_start_a_listing_while_write_maintenance_runs(
+    db, repo, settings
+):
+    """The backup follow-up chain is enqueued when the backup completes,
+    while the plan still runs prune and compact on the same repository.
+    Admission refuses a listing during those (409), so bypass_lock must
+    not dispatch it; it waits in the queue and runs once they finish."""
+    settings.bypass_lock_on_list = True
+    db.commit()
+    op = enqueue(db, "archive_sync", repository_id=repo.id, trigger="followup")
+
+    # a running backup is what bypass is for: the listing may start
+    backup = BackupJob(repository=repo.path, repository_id=repo.id, status="running")
+    db.add(backup)
+    db.commit()
+    assert lanes.write_maintenance_running(db, repo.id) is False
+    assert lanes.can_start(db, op, settings) is True
+
+    # the plan moved on to prune: same backup row, maintenance status
+    backup.status = "running_prune"
+    db.commit()
+    assert lanes.write_maintenance_running(db, repo.id) is True
+    assert lanes.can_start(db, op, settings) is False
+
+    # a legacy prune job row on its own: pending counts (admission refuses
+    # listings from creation on), running too
+    backup.status = "completed"
+    prune = PruneJob(repository_id=repo.id, status="pending")
+    db.add(prune)
+    db.commit()
+    assert lanes.can_start(db, op, settings) is False
+    prune.status = "running"
+    db.commit()
+    assert lanes.can_start(db, op, settings) is False
+
+    # a running compact operation on its own
+    prune.status = "completed"
+    db.commit()
+    compact = _running(db, "compact", repo)
+    assert lanes.can_start(db, op, settings) is False
+    compact.status = "completed"
+    db.commit()
+    assert lanes.can_start(db, op, settings) is True

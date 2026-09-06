@@ -56,6 +56,7 @@ from app.services.agent_job_notifications import (
     notify_check_job_finished,
     orm_identity_id,
 )
+from app.services.operations.followups import enqueue_backup_followups
 from app.utils.datetime_utils import serialize_datetime
 
 logger = structlog.get_logger()
@@ -469,14 +470,33 @@ def _finish_linked_backup_job(
         if archive_name:
             backup_job.archive_name = archive_name
 
-        repository = (
-            db.query(Repository)
-            .filter(Repository.path == backup_job.repository)
-            .first()
-        )
+        repository = None
+        if backup_job.repository_id:
+            repository = db.get(Repository, backup_job.repository_id)
+        if repository is None:
+            repository = (
+                db.query(Repository)
+                .filter(Repository.path == backup_job.repository)
+                .first()
+            )
         if repository:
-            repository.last_backup = completed_at
             repository.updated_at = _now_utc()
+            # archive_sync derives last_backup from the listing; the caller
+            # commits, and the runner polls for the new rows.
+            try:
+                enqueue_backup_followups(
+                    db,
+                    repository.id,
+                    scheduled_job_id=backup_job.scheduled_job_id,
+                    backup_plan_run_id=backup_job.backup_plan_run_id,
+                    commit=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to enqueue index follow-ups",
+                    repository=repository.name,
+                    error=str(exc),
+                )
 
 
 def _get_repository_operation_job(agent_job: AgentJob, db: Session) -> Any | None:
