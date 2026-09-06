@@ -898,6 +898,8 @@ async def _update_agent_repository_stats(repository: Repository, db: Session) ->
 
         encryption_mode = None
         total_size = None
+        total_size_source = None
+        borg_last_modified = None
         try:
             rinfo_job = queue_agent_repository_operation_job(
                 db, repository, job_kind="repository.rinfo"
@@ -924,6 +926,13 @@ async def _update_agent_repository_stats(repository: Repository, db: Session) ->
             size_bytes = stats.get("unique_csize") or stats.get("unique_size")
             if isinstance(size_bytes, (int, float)) and size_bytes > 0:
                 total_size = format_bytes(int(size_bytes))
+                total_size_source = "borg1_cache_stats"
+            # Both versions report the last manifest write; the agent renders
+            # it in its reported zone (UTC since #889).
+            borg_last_modified = _parse_borg_archive_time(
+                (rinfo.get("repository") or {}).get("last_modified"),
+                timezone_name=agent_zone,
+            )
         except Exception as e:
             logger.warning(
                 "agent repo-info for stats refresh failed",
@@ -953,6 +962,7 @@ async def _update_agent_repository_stats(repository: Repository, db: Session) ->
                     fields = first.split()
                     if fields and fields[0].isdigit() and int(fields[0]) > 0:
                         total_size = format_bytes(int(fields[0]))
+                        total_size_source = "storage_used"
             except Exception as e:
                 logger.warning(
                     "agent disk-usage for stats refresh failed",
@@ -968,6 +978,9 @@ async def _update_agent_repository_stats(repository: Repository, db: Session) ->
             repository.encryption = encryption_mode
         if total_size:
             repository.total_size = total_size
+            repository.total_size_source = total_size_source
+        if borg_last_modified:
+            repository.borg_last_modified = borg_last_modified
         db.commit()
         logger.info(
             "Updated agent repository stats",
@@ -6377,7 +6390,8 @@ async def get_repository_stats(
             "compressed_size": "Unknown",
             "deduplicated_size": "Unknown",
             "archive_count": repository.archive_count or 0,
-            "last_modified": format_datetime(repository.updated_at),
+            "last_modified": format_datetime(repository.borg_last_modified),
+            "total_size_source": repository.total_size_source,
             "encryption": repository.encryption or "Unknown",
             "executor": "agent",
         }
@@ -6407,7 +6421,8 @@ async def get_repository_stats(
             "compressed_size": "Unknown",
             "deduplicated_size": "Unknown",
             "archive_count": 0,
-            "last_modified": None,
+            "last_modified": format_datetime(repository.borg_last_modified),
+            "total_size_source": repository.total_size_source,
             "encryption": "Unknown",
         }
 

@@ -545,7 +545,8 @@ class TestRepositoryHelperContracts:
         # Borg 1 repo-info carries repo-level dedup size in cache.stats.
         rinfo_stdout = (
             '{"encryption":{"mode":"repokey-aes-ocb"},'
-            '"cache":{"stats":{"unique_csize":2097152}}}'
+            '"cache":{"stats":{"unique_csize":2097152}},'
+            '"repository":{"last_modified":"2024-02-01T12:30:00+00:00"}}'
         )
         wait_returns = [
             {"success": True, "stdout": list_stdout},
@@ -576,6 +577,8 @@ class TestRepositoryHelperContracts:
         assert repo.archive_count == 2
         assert repo.encryption == "repokey-aes-ocb"
         assert repo.total_size == "2.00 MB"
+        assert repo.total_size_source == "borg1_cache_stats"
+        assert repo.borg_last_modified == datetime(2024, 2, 1, 12, 30)
         assert repo.last_backup == datetime(2024, 2, 1, 12, 0)
         job_kinds = [c.kwargs["job_kind"] for c in mock_queue.call_args_list]
         assert job_kinds == ["repository.list_archives", "repository.rinfo"]
