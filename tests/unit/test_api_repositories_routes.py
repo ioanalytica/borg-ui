@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.api import repositories as repositories_api
 from app.services.storage_usage import SOURCE_BORG1_CACHE_STATS, SizeResult
 from app.database.models import (
+    AgentMachine,
     BackupJob,
     BackupPlan,
     BackupPlanRun,
@@ -591,6 +592,174 @@ class TestRepositoryHelperContracts:
         assert repo.last_backup == datetime(2024, 2, 1, 12, 0)
         job_kinds = [c.kwargs["job_kind"] for c in mock_queue.call_args_list]
         assert job_kinds == ["repository.list_archives", "repository.rinfo"]
+
+    def _agent(self, test_db, capabilities):
+        from app.core.security import get_password_hash
+
+        agent = AgentMachine(
+            name="m",
+            agent_id="agt_m",
+            token_hash=get_password_hash("t"),
+            token_prefix="t",
+            status="online",
+            capabilities=capabilities,
+        )
+        test_db.add(agent)
+        test_db.commit()
+        test_db.refresh(agent)
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_update_repository_stats_prefers_agent_storage_usage(self, test_db):
+        """A 0.1.4 agent measures a Borg 2 store URL read-only and labels the
+        source (#936); the server takes that over du."""
+        agent = self._agent(test_db, ["repository.rinfo", "repository.storage_usage"])
+        repo = _create_repo(
+            test_db,
+            "Agent Repo",
+            "rest://borg@h/m3s/repo",
+            borg_version=2,
+            agent_machine_id=agent.id,
+        )
+        wait_returns = [
+            {"success": True, "stdout": '{"archives":[]}'},
+            {
+                "success": True,
+                "stdout": '{"repository":{"last_modified":"2026-09-06T08:57:17+00:00"}}',
+            },
+            {
+                "return_code": 0,
+                "stdout": '{"bytes": 301284, "objects": 4, "source": "borg2_index"}',
+                "data": {"bytes": 301284, "objects": 4, "source": "borg2_index"},
+            },
+        ]
+
+        async def fake_wait(db, job_id, **kwargs):
+            return wait_returns.pop(0)
+
+        with (
+            patch("app.api.repositories.is_agent_executor", return_value=True),
+            patch(
+                "app.services.repository_executor.queue_agent_repository_operation_job",
+                return_value=SimpleNamespace(id=1),
+            ) as mock_queue,
+            patch(
+                "app.services.agent_job_dispatcher.dispatch_agent_job_best_effort",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.services.repository_executor.wait_for_agent_repository_operation_job",
+                new=fake_wait,
+            ),
+        ):
+            assert await repositories_api.update_repository_stats(repo, test_db) is True
+
+        assert repo.total_size == "294.22 KB"
+        assert repo.total_size_source == "borg2_index"
+        assert repo.borg_last_modified == datetime(2026, 9, 6, 8, 57, 17)
+        job_kinds = [c.kwargs["job_kind"] for c in mock_queue.call_args_list]
+        assert job_kinds == [
+            "repository.list_archives",
+            "repository.rinfo",
+            "repository.storage_usage",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_update_repository_stats_falls_back_to_disk_usage_for_old_agents(
+        self, test_db
+    ):
+        agent = self._agent(test_db, ["repository.rinfo", "repository.disk_usage"])
+        repo = _create_repo(
+            test_db,
+            "Old Agent Repo",
+            "/srv/repo",
+            borg_version=2,
+            agent_machine_id=agent.id,
+        )
+        repo.total_size = "keep"
+        test_db.commit()
+        wait_returns = [
+            {"success": True, "stdout": '{"archives":[]}'},
+            {"success": True, "stdout": "{}"},
+            {"return_code": 0, "stdout": "4096\t/srv/repo\n"},
+        ]
+
+        async def fake_wait(db, job_id, **kwargs):
+            return wait_returns.pop(0)
+
+        with (
+            patch("app.api.repositories.is_agent_executor", return_value=True),
+            patch(
+                "app.services.repository_executor.queue_agent_repository_operation_job",
+                return_value=SimpleNamespace(id=1),
+            ) as mock_queue,
+            patch(
+                "app.services.agent_job_dispatcher.dispatch_agent_job_best_effort",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.services.repository_executor.wait_for_agent_repository_operation_job",
+                new=fake_wait,
+            ),
+        ):
+            assert await repositories_api.update_repository_stats(repo, test_db) is True
+
+        assert repo.total_size == "4.00 KB" and repo.total_size_source == "storage_used"
+        assert [c.kwargs["job_kind"] for c in mock_queue.call_args_list][-1] == (
+            "repository.disk_usage"
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_repository_stats_keeps_size_when_the_agent_cannot_measure(
+        self, test_db
+    ):
+        agent = self._agent(test_db, ["repository.rinfo", "repository.storage_usage"])
+        repo = _create_repo(
+            test_db,
+            "Unmeasurable",
+            "rest://borg@h/r",
+            borg_version=2,
+            agent_machine_id=agent.id,
+        )
+        repo.total_size = "keep"
+        repo.total_size_source = "borg2_index"
+        test_db.commit()
+        wait_returns = [
+            {"success": True, "stdout": '{"archives":[]}'},
+            {"success": True, "stdout": "{}"},
+            {
+                "return_code": 0,
+                "stdout": '{"bytes": null, "objects": null, "source": null, "reason": "unsupported_scheme"}',
+                "data": {
+                    "bytes": None,
+                    "objects": None,
+                    "source": None,
+                    "reason": "unsupported_scheme",
+                },
+            },
+        ]
+
+        async def fake_wait(db, job_id, **kwargs):
+            return wait_returns.pop(0)
+
+        with (
+            patch("app.api.repositories.is_agent_executor", return_value=True),
+            patch(
+                "app.services.repository_executor.queue_agent_repository_operation_job",
+                return_value=SimpleNamespace(id=1),
+            ),
+            patch(
+                "app.services.agent_job_dispatcher.dispatch_agent_job_best_effort",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.services.repository_executor.wait_for_agent_repository_operation_job",
+                new=fake_wait,
+            ),
+        ):
+            assert await repositories_api.update_repository_stats(repo, test_db) is True
+
+        assert repo.total_size == "keep" and repo.total_size_source == "borg2_index"
 
     @pytest.mark.asyncio
     async def test_update_repository_stats_accepts_router_archive_lists(self, test_db):

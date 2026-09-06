@@ -41,6 +41,7 @@ REPOSITORY_JOB_KINDS = {
     "repository.compact",
     "repository.rclone_sync",
     "repository.disk_usage",
+    "repository.storage_usage",
 }
 
 # Kinds whose stdout the server parses timestamps out of. These run under
@@ -150,9 +151,7 @@ class RepositoryOperationPayload:
     def build_command(self, *, rclone_config_path: Optional[str] = None) -> list[str]:
         if self.job_kind == "repository.disk_usage":
             if not self.repository_path:
-                raise ValueError(
-                    "repository.disk_usage requires a repository path"
-                )
+                raise ValueError("repository.disk_usage requires a repository path")
             return ["du", "-sb", "--", self.repository_path]
 
         if self.job_kind == "repository.rclone_sync":
@@ -357,8 +356,11 @@ class RepositoryOperationPayload:
 
         if self.job_kind == "repository.compact":
             if self.borg_version == 2:
+                # --stats: the only place Borg 2 reports repository-wide
+                # statistics; the server parses them from the job log.
                 return [
                     *self._base_borg2("compact"),
+                    "--stats",
                     "--progress",
                     "--verbose",
                     "--log-json",
@@ -565,6 +567,11 @@ def execute_repository_operation_job(
         # zone so they come out UTC. Applied after the server-sent overrides:
         # the reported machine timezone is "UTC" on the same contract.
         env["TZ"] = "UTC"
+    if payload.job_kind == "repository.compact" and payload.borg_version == 2:
+        # The server parses the --stats lines from the job log; raw units
+        # print exact byte counts instead of the rounded human form, which
+        # follows whatever BORG_UNITS the machine environment carries.
+        env["BORG_UNITS"] = "raw"
     if payload.job_kind == "repository.init":
         # Repo creation must not touch the shared pack cache: borgstore
         # rejects an already-populated cache directory on create, and borg
@@ -1379,3 +1386,61 @@ def _terminate_process(process: subprocess.Popen) -> int | None:
         except Exception:
             return process.poll()
         return process.wait(timeout=10)
+
+
+def execute_storage_usage_job(
+    job: dict[str, Any],
+    client: AgentClient,
+    *,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> RepositoryOperationResult:
+    """`repository.storage_usage`: measure a Borg 2 repository read-only and
+    report one JSON object (bytes, objects, source); see storage_usage.py."""
+    from agent.borg_ui_agent import storage_usage
+
+    job_id = int(job["id"])
+    try:
+        payload = RepositoryOperationPayload.from_job_payload(job.get("payload") or {})
+    except (TypeError, ValueError) as exc:
+        error_message = f"Invalid repository operation payload: {exc}"
+        client.send_log(job_id, sequence=0, stream="stderr", message=error_message)
+        client.fail_job(job_id, error_message=error_message)
+        return RepositoryOperationResult(
+            job_id=job_id, status="failed", message=error_message
+        )
+    env = build_borg_env(payload.environment)
+    if payload.remote_path:
+        env.setdefault("BORG_REMOTE_PATH", payload.remote_path)
+    try:
+        data = storage_usage.measure(
+            payload.repository_path,
+            borg_version=payload.borg_version,
+            borg_binary=payload.borg_cmd,
+            env=env,
+            should_cancel=should_cancel,
+        )
+    except storage_usage.Cancelled:
+        client.cancel_job(job_id)
+        return RepositoryOperationResult(
+            job_id=job_id, status="canceled", message=f"{payload.job_kind} canceled"
+        )
+    except Exception as exc:
+        error_message = f"storage usage failed: {exc}"
+        client.send_log(job_id, sequence=0, stream="stderr", message=error_message)
+        client.fail_job(job_id, error_message=error_message)
+        return RepositoryOperationResult(
+            job_id=job_id, status="failed", message=error_message
+        )
+    stdout = json.dumps(data)
+    client.send_log(job_id, sequence=1, stream="stdout", message=stdout)
+    client.complete_job(
+        job_id,
+        result={
+            "return_code": 0,
+            "command": ["repository.storage_usage"],
+            "stdout": stdout,
+            "stderr": "",
+            "data": data,
+        },
+    )
+    return RepositoryOperationResult(job_id=job_id, status="completed", return_code=0)

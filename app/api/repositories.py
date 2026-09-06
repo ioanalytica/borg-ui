@@ -848,6 +848,32 @@ def _agent_result_archives(result) -> list:
     return archives if isinstance(archives, list) else []
 
 
+def _agent_supports(db: Session, repository: Repository, capability: str) -> bool:
+    if not repository.agent_machine_id:
+        return False
+    agent = (
+        db.query(AgentMachine)
+        .filter(AgentMachine.id == repository.agent_machine_id)
+        .first()
+    )
+    return bool(agent and capability in (agent.capabilities or []))
+
+
+def _agent_storage_usage_data(result: Optional[dict]) -> dict:
+    """The JSON object a `repository.storage_usage` job prints."""
+    meta = result or {}
+    if meta.get("return_code", 0) != 0 or meta.get("success", True) is False:
+        return {}
+    data = meta.get("data")
+    if isinstance(data, dict):
+        return data
+    try:
+        parsed = json.loads(meta.get("stdout") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 async def _update_agent_repository_stats(repository: Repository, db: Session) -> bool:
     """Refresh stats for an agent repo by running list + repo-info on the node.
 
@@ -946,10 +972,39 @@ async def _update_agent_repository_stats(repository: Repository, db: Session) ->
                 error=str(e),
             )
 
-        # Borg 2 reports no size through repo-info, so ask the agent to
-        # measure the repository directory it already holds locally. Guarded
-        # on total_size so Borg 1 repositories keep using cache.stats above.
-        if total_size is None:
+        # Borg 2 reports no size through repo-info. Agents from 0.1.4 measure
+        # it read-only (chunk index, else a store tool) and say when they
+        # cannot; older agents only know du, which fails on store URLs.
+        # Guarded on total_size so Borg 1 keeps using cache.stats above.
+        if total_size is None and _agent_supports(
+            db, repository, "repository.storage_usage"
+        ):
+            try:
+                usage_job = queue_agent_repository_operation_job(
+                    db, repository, job_kind="repository.storage_usage"
+                )
+                await dispatch_agent_job_best_effort(
+                    db, usage_job, repository_id=repository.id
+                )
+                usage_result = await wait_for_agent_repository_operation_job(
+                    db, usage_job.id, timeout_seconds=timeouts["info_timeout"]
+                )
+                usage = _agent_storage_usage_data(usage_result)
+                size_bytes = usage.get("bytes")
+                if (
+                    isinstance(size_bytes, int)
+                    and size_bytes > 0
+                    and usage.get("source")
+                ):
+                    total_size = format_bytes(size_bytes)
+                    total_size_source = str(usage["source"])
+            except Exception as e:
+                logger.warning(
+                    "agent storage-usage for stats refresh failed",
+                    repository=repository.name,
+                    error=str(e),
+                )
+        elif total_size is None:
             try:
                 du_job = queue_agent_repository_operation_job(
                     db, repository, job_kind="repository.disk_usage"
