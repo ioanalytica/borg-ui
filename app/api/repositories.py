@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import structlog
 import os
 import asyncio
+from dataclasses import dataclass
 import json
 import re
 import shutil
@@ -858,13 +859,28 @@ async def _release_timed_out_agent_job(db: Session, agent_job_id: int) -> None:
         await dispatch_agent_cancel_if_connected(job)
 
 
-async def _update_agent_repository_stats(repository: Repository, db: Session) -> bool:
+@dataclass
+class AgentStatsReport:
+    """What `_update_agent_repository_stats` did beyond its boolean verdict.
+    `size_written`: the run measured a size and stored it, as opposed to
+    leaving the previous value standing."""
+
+    size_written: bool = False
+
+
+async def _update_agent_repository_stats(
+    repository: Repository,
+    db: Session,
+    *,
+    report: Optional[AgentStatsReport] = None,
+) -> bool:
     """Refresh stats for an agent repo by running list + repo-info on the node.
 
     Sets archive_count, last_backup and encryption from the live agent results.
     A remote Borg 2 repository has no client-computable on-disk size (borg2
     repo-info exposes no size, and du is server/local-only), so total_size is
-    left unchanged rather than reset.
+    left unchanged rather than reset. `report`, when given, records whether
+    a size was written.
     """
     from app.services.agent_job_dispatcher import dispatch_agent_job_best_effort
     from app.services.repository_executor import (
@@ -1042,6 +1058,8 @@ async def _update_agent_repository_stats(repository: Repository, db: Session) ->
         if total_size:
             repository.total_size = total_size
             repository.total_size_source = total_size_source
+            if report is not None:
+                report.size_written = True
         if borg_last_modified:
             repository.borg_last_modified = borg_last_modified
         db.commit()

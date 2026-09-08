@@ -83,6 +83,23 @@ against the backup row holding the lane in `running_prune`. An inline
 operation still gets a real row and the same follow-up chain a
 runner-dispatched one would get, just without the runner's queueing.
 
+A Borg 2 compact on the server runs with `--stats --info` under
+`BORG_UNITS=raw`; a managed agent runs the same from agent release 0.1.4 on
+(an older agent sends no statistics, and the server records none). The
+repository statistics Borg 2 reports only there ("Repository size is N B
+in M objects." and the lines around it, exact byte counts) are parsed from
+the log and stored on the operation as `result["stats"]`; a successful
+compact also refreshes the repository `total_size` from `repository_size`
+with `total_size_source = compact_stats`. The `stats` follow-up that runs
+after a compact replaces that size with its own measurement (the chunk
+index sum or a store walk, see `storage_usage`) where one is available;
+where nothing else can measure a Borg 2 repository, the compact value is
+what stays. Lines an agent delivers after its completion are appended to
+the operation's transcript; only a compact's statistics lines are
+re-processed from them (a prune's late `--list` lines are not fed back into
+the pruned-archive marking), and they never overwrite a size the follow-up
+or a later compact has measured since.
+
 Use them carefully:
 
 - checks can be expensive on large repositories

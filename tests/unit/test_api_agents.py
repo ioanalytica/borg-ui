@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -1597,6 +1599,438 @@ class TestAgentJobNotifications:
         test_db.refresh(job)
         return job, check_job, repository
 
+    def _running_compact_operation(self, test_db, repository):
+        operation = Operation(
+            repository_id=repository.id,
+            kind="compact",
+            category="maintenance",
+            status="running",
+            trigger="manual",
+            priority=10,
+            run_id="run-compact",
+        )
+        test_db.add(operation)
+        test_db.commit()
+        return operation
+
+    def _compact_agent_job(self, test_db, agent, repository, operation):
+        now = datetime.now(timezone.utc)
+        job = AgentJob(
+            agent_machine_id=agent.id,
+            job_type="repository",
+            status="running",
+            payload={
+                "schema_version": 1,
+                "job_kind": "repository.compact",
+                "repository": {"id": repository.id},
+                "operation": {
+                    "maintenance_job": {"kind": "compact", "id": operation.id}
+                },
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        test_db.add(job)
+        test_db.commit()
+        return job
+
+    def test_agent_compact_completion_persists_stats_from_job_log(
+        self, test_client, test_db, admin_headers
+    ):
+        """An agent compact that ran with --stats --info streams the INFO
+        statistics lines into the job log; completion parses them onto the
+        operation's result and refreshes total_size (#931)."""
+        agent, headers = self._register(test_client, test_db, admin_headers)
+        repository = Repository(name="agent-compact-repo", path="/agent-compact")
+        test_db.add(repository)
+        test_db.commit()
+        operation = self._running_compact_operation(test_db, repository)
+        job = self._compact_agent_job(test_db, agent, repository, operation)
+        for sequence, message in enumerate(
+            (
+                "Repository size is 502000 B in 6 objects.",
+                "Compaction saved 0 B.",
+            ),
+            start=1,
+        ):
+            log = test_client.post(
+                f"/api/agents/jobs/{job.id}/logs",
+                json={
+                    "sequence": sequence,
+                    "stream": "stderr",
+                    "message": json.dumps(
+                        {
+                            "type": "log_message",
+                            "levelname": "INFO",
+                            "name": "borg.archiver.compact_cmd",
+                            "message": message,
+                        }
+                    ),
+                },
+                headers=headers,
+            )
+            assert log.status_code == 200, log.text
+
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/complete",
+            json={"result": {"return_code": 0}},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        test_db.refresh(operation)
+        test_db.refresh(repository)
+        assert operation.status == "completed"
+        assert operation.result["stats"]["repository_size"] == 502_000
+        assert operation.result["stats"]["compaction_saved"] == 0
+        assert repository.total_size == "490.23 KB"
+        assert repository.total_size_source == "compact_stats"
+
+        status = test_client.get(
+            f"/api/repositories/compact-jobs/{operation.id}",
+            headers=admin_headers,
+        )
+        assert status.status_code == 200, status.text
+        assert status.json()["stats"]["repository_size"] == 502_000
+
+    def test_agent_compact_statistics_arriving_after_completion_are_absorbed(
+        self, test_client, test_db, admin_headers
+    ):
+        """Seen live: the agent's last log lines and its completion are
+        handled on different paths and the completion won the race by
+        150 ms, so the parse at completion saw no statistics. A later log
+        line for a completed compact re-collects and parses them, and the
+        operation's log file grows with it (the facade's `logs` setter is a
+        no-op once the file exists)."""
+        agent, headers = self._register(test_client, test_db, admin_headers)
+        repository = Repository(
+            name="agent-compact-late", path="/agent-compact-late", total_size="keep"
+        )
+        test_db.add(repository)
+        test_db.commit()
+        operation = self._running_compact_operation(test_db, repository)
+        job = self._compact_agent_job(test_db, agent, repository, operation)
+
+        def post_log(sequence, message):
+            response = test_client.post(
+                f"/api/agents/jobs/{job.id}/logs",
+                json={
+                    "sequence": sequence,
+                    "stream": "stdout",
+                    "message": json.dumps(
+                        {
+                            "type": "log_message",
+                            "levelname": "INFO",
+                            "name": "borg.archiver.compact_cmd",
+                            "message": message,
+                        }
+                    ),
+                },
+                headers=headers,
+            )
+            assert response.status_code == 200, response.text
+
+        post_log(1, "Starting compaction / garbage collection...")
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/complete",
+            json={"result": {"return_code": 0}},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        test_db.refresh(operation)
+        assert operation.status == "completed"
+        assert (operation.result or {}).get("stats") is None
+        assert Path(operation.log_file_path).read_text().count("log_message") == 1
+
+        # the statistics lines arrive after the completion
+        post_log(2, "Repository size is 1836754184 B in 2796 objects.")
+        post_log(3, "Compaction saved 0 B.")
+        test_db.refresh(operation)
+        test_db.refresh(repository)
+        stats = operation.result["stats"]
+        assert stats["repository_size"] == 1_836_754_184
+        assert stats["size_precision"] == "exact"
+        assert stats["compaction_saved"] == 0
+        assert "Compaction saved" in Path(operation.log_file_path).read_text()
+        assert repository.total_size == "1.71 GB"
+        assert repository.total_size_source == "compact_stats"
+
+        # a further line is kept in the log; the statistics stay
+        post_log(4, "Finished compaction / garbage collection...")
+        test_db.refresh(operation)
+        assert operation.result["stats"]["repository_size"] == 1_836_754_184
+        assert Path(operation.log_file_path).read_text().count("log_message") == 4
+
+    def test_late_compact_statistics_keep_a_size_measured_since(
+        self, test_client, test_db, admin_headers
+    ):
+        """The `stats` follow-up is enqueued the moment the compact completes
+        and can finish before the agent's last frames drain. Its measurement
+        is newer and stands; the statistics still land on the operation."""
+        agent, headers = self._register(test_client, test_db, admin_headers)
+        repository = Repository(name="agent-compact-newer", path="/agent-newer")
+        test_db.add(repository)
+        test_db.commit()
+        operation = self._running_compact_operation(test_db, repository)
+        job = self._compact_agent_job(test_db, agent, repository, operation)
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/complete",
+            json={"result": {"return_code": 0}},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        test_db.refresh(operation)
+        followup = Operation(
+            repository_id=repository.id,
+            kind="stats",
+            category="index",
+            status="completed",
+            trigger="followup",
+            priority=10,
+            run_id="run-compact",
+            depends_on_id=operation.id,
+            completed_at=operation.completed_at + timedelta(seconds=1),
+            result={"bytes": 7_000_000_000, "size_refreshed": True},
+        )
+        repository.total_size = "7.00 GB"
+        repository.total_size_source = "borg2_index"
+        test_db.add(followup)
+        test_db.commit()
+
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/logs",
+            json={
+                "sequence": 1,
+                "stream": "stdout",
+                "message": "Repository size is 5 B in 1 objects.",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        test_db.refresh(operation)
+        test_db.refresh(repository)
+        assert operation.result["stats"]["repository_size"] == 5
+        assert repository.total_size == "7.00 GB"
+        assert repository.total_size_source == "borg2_index"
+
+    def test_late_compact_statistics_replace_a_size_the_followup_could_not_measure(
+        self, test_client, test_db, admin_headers
+    ):
+        """A `stats` follow-up that completed without writing a size (nothing
+        can measure this repository) leaves the compact's figure as the one
+        to use, however old the stored size is."""
+        agent, headers = self._register(test_client, test_db, admin_headers)
+        repository = Repository(
+            name="agent-compact-unmeasurable",
+            path="/agent-unmeasurable",
+            total_size="7.00 GB",
+            total_size_source="storage_used",
+        )
+        test_db.add(repository)
+        test_db.commit()
+        operation = self._running_compact_operation(test_db, repository)
+        job = self._compact_agent_job(test_db, agent, repository, operation)
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/complete",
+            json={"result": {"return_code": 0}},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        test_db.refresh(operation)
+        test_db.add(
+            Operation(
+                repository_id=repository.id,
+                kind="stats",
+                category="index",
+                status="completed",
+                trigger="followup",
+                priority=10,
+                run_id="run-compact",
+                depends_on_id=operation.id,
+                completed_at=operation.completed_at + timedelta(seconds=1),
+                result={"total_size": "7.00 GB", "size_refreshed": False},
+            )
+        )
+        test_db.commit()
+
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/logs",
+            json={
+                "sequence": 1,
+                "stream": "stdout",
+                "message": "Repository size is 1836754184 B in 2796 objects.",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        test_db.refresh(repository)
+        assert repository.total_size == "1.71 GB"
+        assert repository.total_size_source == "compact_stats"
+
+    def test_late_compact_statistics_are_ignored_long_after_completion(
+        self, test_client, test_db, admin_headers
+    ):
+        """The absorption exists for lines the outbox delivers seconds after
+        the completion. A line for a job that completed long ago is stored
+        as a log row and changes nothing else."""
+        agent, headers = self._register(test_client, test_db, admin_headers)
+        repository = Repository(
+            name="agent-compact-stale", path="/agent-stale", total_size="keep"
+        )
+        test_db.add(repository)
+        test_db.commit()
+        operation = self._running_compact_operation(test_db, repository)
+        job = self._compact_agent_job(test_db, agent, repository, operation)
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/complete",
+            json={"result": {"return_code": 0}},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        test_db.refresh(job)
+        job.updated_at = job.updated_at - timedelta(hours=1)
+        test_db.commit()
+
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/logs",
+            json={
+                "sequence": 1,
+                "stream": "stdout",
+                "message": "Repository size is 0 B in 0 objects.",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        test_db.refresh(operation)
+        test_db.refresh(repository)
+        assert (operation.result or {}).get("stats") is None
+        assert repository.total_size == "keep"
+        assert "Repository size" not in Path(operation.log_file_path).read_text()
+        assert (
+            test_db.query(AgentJobLog)
+            .filter(AgentJobLog.agent_job_id == job.id)
+            .count()
+            == 1
+        )
+
+    def test_late_compact_statistics_on_a_legacy_row(
+        self, test_client, test_db, admin_headers
+    ):
+        """A compact queued before phase 5 lives in `compact_jobs`. Its late
+        statistics still refresh the repository size and its `logs` column
+        grows; the statistics themselves have no column there and are not
+        kept."""
+        from sqlalchemy.orm import Session as SASession
+
+        from app.database.models import CompactJob
+
+        agent, headers = self._register(test_client, test_db, admin_headers)
+        repository = Repository(name="agent-compact-legacy", path="/agent-legacy")
+        test_db.add(repository)
+        test_db.commit()
+        compact_job = CompactJob(repository_id=repository.id, status="running")
+        test_db.add(compact_job)
+        test_db.commit()
+        now = datetime.now(timezone.utc)
+        job = AgentJob(
+            agent_machine_id=agent.id,
+            job_type="repository",
+            status="running",
+            payload={
+                "schema_version": 1,
+                "job_kind": "repository.compact",
+                "repository": {"id": repository.id},
+                "operation": {
+                    "maintenance_job": {"kind": "compact", "id": compact_job.id}
+                },
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        test_db.add(job)
+        test_db.commit()
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/complete",
+            json={"result": {"return_code": 0}},
+            headers=headers,
+        )
+        assert response.status_code == 200
+
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/logs",
+            json={
+                "sequence": 1,
+                "stream": "stdout",
+                "message": "Repository size is 502000 B in 6 objects.",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        test_db.expire_all()
+        refreshed = test_db.get(CompactJob, compact_job.id)
+        test_db.refresh(repository)
+        assert refreshed.status == "completed"
+        assert refreshed.logs.endswith("Repository size is 502000 B in 6 objects.")
+        assert refreshed.has_logs is True
+        assert "stats" not in CompactJob.__table__.columns
+        with SASession(bind=test_db.get_bind()) as fresh:
+            assert getattr(fresh.get(CompactJob, compact_job.id), "stats", None) is None
+        assert repository.total_size == "490.23 KB"
+        assert repository.total_size_source == "compact_stats"
+
+    def test_compact_completion_keeps_a_size_measured_while_it_was_unreported(
+        self, test_client, test_db, admin_headers
+    ):
+        """The agent finished, lost its connection, and reports ten minutes
+        later; a `stats` follow-up measured the repository in between. The
+        completion parse must not overwrite that with the older figure."""
+        agent, headers = self._register(test_client, test_db, admin_headers)
+        repository = Repository(
+            name="agent-compact-reported-late",
+            path="/agent-reported-late",
+            total_size="7.00 GB",
+            total_size_source="borg2_index",
+        )
+        test_db.add(repository)
+        test_db.commit()
+        operation = self._running_compact_operation(test_db, repository)
+        job = self._compact_agent_job(test_db, agent, repository, operation)
+        finished = datetime.now(timezone.utc) - timedelta(minutes=10)
+        test_db.add(
+            Operation(
+                repository_id=repository.id,
+                kind="stats",
+                category="index",
+                status="completed",
+                trigger="schedule",
+                priority=10,
+                run_id="run-between",
+                completed_at=(finished + timedelta(minutes=5)).replace(tzinfo=None),
+                result={"bytes": 7_000_000_000, "size_refreshed": True},
+            )
+        )
+        test_db.commit()
+        log = test_client.post(
+            f"/api/agents/jobs/{job.id}/logs",
+            json={
+                "sequence": 1,
+                "stream": "stderr",
+                "message": "Repository size is 502000 B in 6 objects.",
+            },
+            headers=headers,
+        )
+        assert log.status_code == 200, log.text
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/complete",
+            json={"result": {"return_code": 0}, "completed_at": finished.isoformat()},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        test_db.refresh(operation)
+        test_db.refresh(repository)
+        assert operation.result["stats"]["repository_size"] == 502_000
+        assert repository.total_size == "7.00 GB"
+        assert repository.total_size_source == "borg2_index"
+
     def test_agent_check_completion_sends_check_notification(
         self, test_client, test_db, admin_headers
     ):
@@ -1951,3 +2385,531 @@ class TestAgentTimezone:
         assert response.status_code == 200
         test_db.refresh(agent)
         assert agent.timezone == "America/New_York"
+
+
+@pytest.mark.unit
+def test_append_operation_log_appends_lines_in_order(tmp_path):
+    """The facade's `logs` setter is a no-op once the file exists; late lines
+    go to the file directly, one per line, no leading blank line on an empty
+    transcript, and an empty message adds nothing."""
+    from types import SimpleNamespace
+
+    from app.api.agents import _append_operation_log
+    from app.services.operations.job_facade import MaintenanceJobFacade
+
+    log = tmp_path / "operation_1.log"
+    log.write_text("")
+    operation = SimpleNamespace(id=1, log_file_path=str(log), kind="compact")
+    facade = MaintenanceJobFacade.__new__(MaintenanceJobFacade)
+    object.__setattr__(facade, "_db", None)
+    object.__setattr__(facade, "operation", operation)
+    object.__setattr__(facade, "_fields", ())
+
+    _append_operation_log(facade, "first")
+    _append_operation_log(facade, "")
+    _append_operation_log(facade, "Repository size is 5 B in 1 objects.")
+    _append_operation_log(facade, "Repository size is 5 B in 1 objects.")
+    assert log.read_text() == (
+        "first\nRepository size is 5 B in 1 objects.\n"
+        "Repository size is 5 B in 1 objects."
+    )
+
+
+def _session_agent(test_db):
+    from app.core.security import get_password_hash
+
+    agent = AgentMachine(
+        name="Session Agent",
+        agent_id="agt_session",
+        token_hash=get_password_hash("secret"),
+        token_prefix="secret"[:20],
+        status="online",
+        capabilities=[],
+    )
+    test_db.add(agent)
+    test_db.commit()
+    test_db.refresh(agent)
+    return agent
+
+
+def _completed_agent_compact(test_db, tmp_path, agent, *, status="completed"):
+    """The state after `/complete` ran: agent job final, operation terminal
+    with the transcript collected so far in its log file."""
+    repository = Repository(name=f"session-{status}", path=f"/session-{status}")
+    test_db.add(repository)
+    test_db.commit()
+    now = datetime.now(timezone.utc)
+    log = tmp_path / f"operation-{status}.log"
+    log.write_text("Starting compaction / garbage collection...")
+    operation = Operation(
+        repository_id=repository.id,
+        kind="compact",
+        category="maintenance",
+        status=status,
+        trigger="manual",
+        priority=10,
+        run_id="run-session",
+        started_at=now,
+        completed_at=now,
+        log_file_path=str(log),
+    )
+    test_db.add(operation)
+    test_db.commit()
+    job = AgentJob(
+        agent_machine_id=agent.id,
+        job_type="repository",
+        status=status,
+        payload={
+            "schema_version": 1,
+            "job_kind": "repository.compact",
+            "repository": {"id": repository.id},
+            "operation": {"maintenance_job": {"kind": "compact", "id": operation.id}},
+        },
+        created_at=now,
+        updated_at=now,
+        completed_at=now,
+    )
+    test_db.add(job)
+    test_db.commit()
+    return repository, operation, job, log
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_session_log_line_after_completion_is_absorbed(test_db, tmp_path):
+    """The race only exists on the WebSocket session, whose log frames reach
+    the server through `_handle_agent_session_message` while the completion
+    went over HTTP. Drive that handler."""
+    from app.api.agents import _handle_agent_session_message
+
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(test_db, tmp_path, agent)
+    frame = {
+        "type": "log",
+        "job_id": job.id,
+        "sequence": 7,
+        "stream": "stdout",
+        "message": json.dumps(
+            {
+                "type": "log_message",
+                "levelname": "INFO",
+                "name": "borg.archiver.compact_cmd",
+                "message": "Repository size is 502000 B in 6 objects.",
+            }
+        ),
+    }
+    await _handle_agent_session_message(test_db, agent.id, frame)
+    # the same frame again (a resend) changes nothing
+    await _handle_agent_session_message(test_db, agent.id, frame)
+
+    test_db.expire_all()
+    operation = test_db.get(Operation, operation.id)
+    repository = test_db.get(Repository, repository.id)
+    assert operation.result["stats"]["repository_size"] == 502_000
+    assert operation.result["stats"]["size_precision"] == "exact"
+    assert repository.total_size == "490.23 KB"
+    assert repository.total_size_source == "compact_stats"
+    assert log.read_text().count("Repository size") == 1
+    assert (
+        test_db.query(AgentJobLog).filter(AgentJobLog.agent_job_id == job.id).count()
+        == 1
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_session_log_line_after_a_failed_compact_reaches_the_transcript(
+    test_db, tmp_path
+):
+    """A failed compact's last frames are the lines that say why it failed;
+    they belong in the operation's transcript even though there are no
+    statistics to parse."""
+    from app.api.agents import _handle_agent_session_message
+
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(
+        test_db, tmp_path, agent, status="failed"
+    )
+    await _handle_agent_session_message(
+        test_db,
+        agent.id,
+        {
+            "type": "log",
+            "job_id": job.id,
+            "sequence": 7,
+            "stream": "stderr",
+            "message": "Repository size is 502000 B in 6 objects.",
+        },
+    )
+    await _handle_agent_session_message(
+        test_db,
+        agent.id,
+        {
+            "type": "log",
+            "job_id": job.id,
+            "sequence": 8,
+            "stream": "stderr",
+            "message": "borg: error: Lock failed",
+        },
+    )
+    test_db.expire_all()
+    operation = test_db.get(Operation, operation.id)
+    repository = test_db.get(Repository, repository.id)
+    assert log.read_text().endswith("\nborg: error: Lock failed")
+    assert operation.result is None
+    assert repository.total_size is None
+
+
+@pytest.mark.unit
+def test_size_measured_since_needs_a_follow_up_that_wrote_a_size(test_db):
+    from types import SimpleNamespace
+
+    from app.api.agents import _size_measured_since
+
+    repository = Repository(name="since", path="/since")
+    test_db.add(repository)
+    test_db.commit()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    compact = SimpleNamespace(id=0, repository_id=repository.id, completed_at=now)
+
+    assert not _size_measured_since(test_db, compact)
+    assert not _size_measured_since(
+        test_db, SimpleNamespace(id=0, repository_id=repository.id, completed_at=None)
+    )
+    assert not _size_measured_since(
+        test_db, SimpleNamespace(id=0, repository_id=None, completed_at=now)
+    )
+
+    def followup(**fields):
+        return Operation(
+            repository_id=repository.id,
+            kind="stats",
+            category="index",
+            status="completed",
+            trigger="followup",
+            priority=10,
+            run_id="run-since",
+            completed_at=now + timedelta(seconds=1),
+            **fields,
+        )
+
+    test_db.add(followup(result=None))
+    test_db.commit()
+    assert not _size_measured_since(test_db, compact)
+    test_db.add(followup(result={"total_size": "keep", "size_refreshed": False}))
+    test_db.commit()
+    assert not _size_measured_since(test_db, compact)
+    test_db.add(followup(result={"bytes": 5, "size_refreshed": True}))
+    test_db.commit()
+    assert _size_measured_since(test_db, compact)
+
+    # a compact whose agent clock ran slow: the lookback starts no earlier
+    # than the server-stamped claim, so a measurement between the two does
+    # not count as newer
+    slow = SimpleNamespace(
+        id=0, repository_id=repository.id, completed_at=now - timedelta(hours=1)
+    )
+    assert _size_measured_since(test_db, slow)
+    assert not _size_measured_since(
+        test_db, slow, not_before=now + timedelta(seconds=2)
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_session_log_line_with_an_agent_clock_off_is_absorbed(test_db, tmp_path):
+    """The window is anchored on the server time of the job's completion,
+    not on the completion timestamp an agent may supply: one from a slow
+    clock (an hour in the past) or a fast one does not close or widen it."""
+    from app.api.agents import _handle_agent_session_message
+
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(test_db, tmp_path, agent)
+    operation.completed_at = operation.completed_at - timedelta(hours=1)
+    job.completed_at = job.completed_at - timedelta(hours=1)
+    test_db.commit()
+    await _handle_agent_session_message(
+        test_db,
+        agent.id,
+        {
+            "type": "log",
+            "job_id": job.id,
+            "sequence": 7,
+            "stream": "stdout",
+            "message": "Repository size is 502000 B in 6 objects.",
+        },
+    )
+    test_db.expire_all()
+    assert test_db.get(Operation, operation.id).result["stats"]["repository_size"] == (
+        502_000
+    )
+    assert test_db.get(Repository, repository.id).total_size == "490.23 KB"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_session_log_line_with_rounded_units_keeps_the_size(test_db, tmp_path):
+    """An agent whose Borg ignored BORG_UNITS=raw prints rounded sizes: the
+    statistics land on the operation, the size stays what it was."""
+    from app.api.agents import _handle_agent_session_message
+
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(test_db, tmp_path, agent)
+    repository.total_size = "1.43 MB"
+    repository.total_size_source = "borg2_index"
+    test_db.commit()
+    await _handle_agent_session_message(
+        test_db,
+        agent.id,
+        {
+            "type": "log",
+            "job_id": job.id,
+            "sequence": 7,
+            "stream": "stdout",
+            "message": "Repository size is 502 kB in 6 objects.",
+        },
+    )
+    test_db.expire_all()
+    stats = test_db.get(Operation, operation.id).result["stats"]
+    assert stats["repository_size"] == 502_000
+    assert stats["size_precision"] == "rounded_to_printed_unit"
+    repository = test_db.get(Repository, repository.id)
+    # a measured size is kept over a rounded figure
+    assert repository.total_size == "1.43 MB"
+    assert repository.total_size_source == "borg2_index"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_session_delivers_the_whole_statistics_block_after_completion(
+    test_db, tmp_path
+):
+    """The realistic case: the agent's outbox drains the complete block after
+    the completion report. Every line lands in the transcript; the dict is
+    complete once the closing lines are in."""
+    from app.api.agents import _handle_agent_session_message
+
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(test_db, tmp_path, agent)
+    block = [
+        "Overall statistics, considering all 2 archives in this repository:",
+        "Source data size was 1000000 B in 6 files.",
+        "Deduplicated size is 500000 B.",
+        "Deduplication factor is 0.50.",
+        "Repository size is 502000 B in 6 objects.",
+        "Compression factor is 1.00.",
+        "Compaction saved 0 B.",
+        "Finished compaction / garbage collection...",
+    ]
+    for sequence, line in enumerate(block, start=7):
+        await _handle_agent_session_message(
+            test_db,
+            agent.id,
+            {
+                "type": "log",
+                "job_id": job.id,
+                "sequence": sequence,
+                "stream": "stdout",
+                "message": line,
+            },
+        )
+    test_db.expire_all()
+    stats = test_db.get(Operation, operation.id).result["stats"]
+    assert stats == {
+        "archive_count": 2,
+        "source_size": 1_000_000,
+        "source_files": 6,
+        "deduplicated_size": 500_000,
+        "deduplication_factor": 0.5,
+        "repository_size": 502_000,
+        "object_count": 6,
+        "compression_factor": 1.0,
+        "compaction_saved": 0,
+        "size_precision": "exact",
+    }
+    assert log.read_text().splitlines() == [
+        "Starting compaction / garbage collection...",
+        *block,
+    ]
+    assert test_db.get(Repository, repository.id).total_size == "490.23 KB"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_late_statistics_do_not_undo_a_later_compact(test_db, tmp_path):
+    """A second compact ran (and recorded its own exact size) while the first
+    one's lines were stuck in the outbox: the older figure must not win."""
+    from app.api.agents import _handle_agent_session_message
+
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(test_db, tmp_path, agent)
+    later = Operation(
+        repository_id=repository.id,
+        kind="compact",
+        category="maintenance",
+        status="completed",
+        trigger="manual",
+        priority=10,
+        run_id="run-later",
+        completed_at=operation.completed_at + timedelta(minutes=2),
+        result={"stats": {"repository_size": 400_000, "size_precision": "exact"}},
+    )
+    repository.total_size = "390.63 KB"
+    repository.total_size_source = "compact_stats"
+    test_db.add(later)
+    test_db.commit()
+    await _handle_agent_session_message(
+        test_db,
+        agent.id,
+        {
+            "type": "log",
+            "job_id": job.id,
+            "sequence": 7,
+            "stream": "stdout",
+            "message": "Repository size is 502000 B in 6 objects.",
+        },
+    )
+    test_db.expire_all()
+    assert test_db.get(Operation, operation.id).result["stats"]["repository_size"] == (
+        502_000
+    )
+    assert test_db.get(Repository, repository.id).total_size == "390.63 KB"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_session_frame_with_two_lines_is_parsed_like_the_completion_path(
+    test_db, tmp_path
+):
+    """An agent may flush two stderr lines in one frame; the late path must
+    see the closing line inside it as the completion path would."""
+    from app.api.agents import _handle_agent_session_message
+
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(test_db, tmp_path, agent)
+    await _handle_agent_session_message(
+        test_db,
+        agent.id,
+        {
+            "type": "log",
+            "job_id": job.id,
+            "sequence": 7,
+            "stream": "stdout",
+            "message": (
+                "Repository size is 1836754184 B in 2796 objects.\n"
+                "Compaction saved 0 B."
+            ),
+        },
+    )
+    test_db.expire_all()
+    stats = test_db.get(Operation, operation.id).result["stats"]
+    assert stats["repository_size"] == 1_836_754_184
+    assert stats["compaction_saved"] == 0
+    assert test_db.get(Repository, repository.id).total_size == "1.71 GB"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_session_log_line_is_kept_when_absorbing_fails(
+    test_db, tmp_path, monkeypatch
+):
+    """The absorb is a side effect: when it raises, the line is stored, the
+    handler returns normally (the session stays up) and nothing half-done
+    is left in the database."""
+    from app.api import agents as agents_module
+    from app.api.agents import _handle_agent_session_message
+
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(test_db, tmp_path, agent)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(agents_module, "_absorb_late_compact_stats", boom)
+    await _handle_agent_session_message(
+        test_db,
+        agent.id,
+        {
+            "type": "log",
+            "job_id": job.id,
+            "sequence": 7,
+            "stream": "stdout",
+            "message": "Repository size is 502000 B in 6 objects.",
+        },
+    )
+    test_db.expire_all()
+    assert (
+        test_db.query(AgentJobLog).filter(AgentJobLog.agent_job_id == job.id).count()
+        == 1
+    )
+    assert test_db.get(Operation, operation.id).result is None
+    assert test_db.get(Repository, repository.id).total_size is None
+    assert "Repository size" not in log.read_text()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_session_log_line_creates_the_transcript_file_when_missing(
+    test_db, tmp_path, monkeypatch
+):
+    """An operation that reached a terminal state without a log file (the
+    runner failed it before the agent reported) gets one from its late
+    lines, appended, so a second line never truncates the first."""
+    from app.api.agents import _handle_agent_session_message
+
+    monkeypatch.setattr("app.config.settings.data_dir", str(tmp_path))
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(
+        test_db, tmp_path, agent, status="failed"
+    )
+    operation.log_file_path = None
+    test_db.commit()
+    for sequence, line in ((7, "first late line"), (8, "second late line")):
+        await _handle_agent_session_message(
+            test_db,
+            agent.id,
+            {
+                "type": "log",
+                "job_id": job.id,
+                "sequence": sequence,
+                "stream": "stderr",
+                "message": line,
+            },
+        )
+    test_db.expire_all()
+    operation = test_db.get(Operation, operation.id)
+    assert operation.log_file_path == str(
+        tmp_path / "logs" / f"operation_{operation.id}.log"
+    )
+    assert (
+        Path(operation.log_file_path).read_text() == "first late line\nsecond late line"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age_minutes,absorbed", [(9, True), (11, False)])
+async def test_late_line_window_boundary(test_db, tmp_path, age_minutes, absorbed):
+    """LATE_LOG_ABSORB_WINDOW is ten minutes from the job's server-stamped
+    completion."""
+    from app.api.agents import _handle_agent_session_message
+
+    agent = _session_agent(test_db)
+    repository, operation, job, log = _completed_agent_compact(test_db, tmp_path, agent)
+    job.updated_at = job.updated_at - timedelta(minutes=age_minutes)
+    test_db.commit()
+    await _handle_agent_session_message(
+        test_db,
+        agent.id,
+        {
+            "type": "log",
+            "job_id": job.id,
+            "sequence": 7,
+            "stream": "stdout",
+            "message": "Repository size is 502000 B in 6 objects.",
+        },
+    )
+    test_db.expire_all()
+    stats = (test_db.get(Operation, operation.id).result or {}).get("stats")
+    assert (stats is not None) is absorbed
+    assert ("Repository size" in log.read_text()) is absorbed

@@ -35,10 +35,12 @@ from app.database.models import (
     AgentJobLog,
     AgentMachine,
     BackupJob,
+    Operation,
     Repository,
 )
 from app.services.operations.job_facade import (
     LEGACY_MODELS,
+    MaintenanceJobFacade,
     resolve_maintenance_job,
 )
 from app.services.agent_artifact_relay import agent_artifact_relay
@@ -56,10 +58,17 @@ from app.services.agent_job_notifications import (
     notify_check_job_finished,
     orm_identity_id,
 )
+from app.services.borg2_compact_stats import (
+    is_stats_closing_line,
+    parse_compact_stats,
+)
+from app.services.maintenance_state import apply_compact_stats
+from app.services.operations.events import broadcast_operation_updated
 from app.services.operations.followups import (
     enqueue_backup_followups,
     history_enabled,
 )
+from app.services.operations.vocab import SUCCESS_STATUSES, TERMINAL_STATUSES
 from app.utils.datetime_utils import serialize_datetime
 
 logger = structlog.get_logger()
@@ -103,6 +112,13 @@ FINAL_AGENT_JOB_STATUSES = {
 # activity is newer than the cutoff, so a genuinely running operation is
 # never requeued however long it takes.
 STALE_AGENT_JOB_REQUEUE_AFTER = timedelta(minutes=2)
+# How long after an agent job completed its late log lines are still absorbed
+# into the linked operation. The agent's outbox drains within seconds; a
+# reconnect can stretch that, a line days later is a replay. Measured from
+# the server time of the job's terminal transition (`AgentJob.updated_at`,
+# which later lines of a completed job leave alone), so the agent's own
+# clock, which may fill `completed_at`, does not decide it.
+LATE_LOG_ABSORB_WINDOW = timedelta(minutes=10)
 # The maintenance kinds an agent can run. Phase 5 moved these to the
 # `operations` table; `resolve_maintenance_job` hands back an operation-backed
 # facade for new work and the legacy row for anything queued before the
@@ -437,6 +453,25 @@ def _collect_agent_logs(job: AgentJob, db: Session) -> str:
     return "\n".join(log.message for log in logs)
 
 
+# A Borg 2 compact prints its statistics as the last lines of the run; this
+# many rows from the end are enough to hold all of them.
+COMPACT_STATS_TAIL_LINES = 64
+
+
+def _collect_agent_log_tail(job: AgentJob, db: Session, limit: int) -> list[str]:
+    """The last `limit` log rows, as lines: a row may carry several (an
+    agent flushing two stderr lines in one frame), and the completion path
+    splits the joined transcript the same way."""
+    logs = (
+        db.query(AgentJobLog.message)
+        .filter(AgentJobLog.agent_job_id == job.id)
+        .order_by(AgentJobLog.sequence.desc(), AgentJobLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [line for (message,) in reversed(logs) for line in message.splitlines()]
+
+
 def _sync_backup_progress(agent_job: AgentJob, backup_job: BackupJob) -> None:
     for field_name in (
         "progress_percent",
@@ -574,8 +609,9 @@ def _finish_linked_repository_operation_job(
         operation_job.started_at = agent_job.started_at or completed_at
     operation_job.completed_at = completed_at
     operation_job.error_message = error_message
-    operation_job.logs = _collect_agent_logs(agent_job, db)
-    operation_job.has_logs = bool(operation_job.logs)
+    logs = _collect_agent_logs(agent_job, db)
+    operation_job.logs = logs
+    operation_job.has_logs = bool(logs)
     if status_value in ("completed", "completed_with_warnings") and hasattr(
         operation_job, "progress"
     ):
@@ -592,6 +628,25 @@ def _finish_linked_repository_operation_job(
             repository.last_check = completed_at
         elif kind == "compact":
             repository.last_compact = completed_at
+            stats = parse_compact_stats(logs.splitlines()[-COMPACT_STATS_TAIL_LINES:])
+            if stats is None and repository.borg_version == 2:
+                # Usually the statistics lines are still in the agent's
+                # outbox (absorbed by `_absorb_late_compact_stats` when they
+                # arrive); an agent that predates `compact --stats` never
+                # sends them.
+                logger.debug(
+                    "Agent compact reported no statistics",
+                    operation_id=operation_job.id,
+                    repository_id=repository.id,
+                )
+            apply_compact_stats(
+                operation_job,
+                repository,
+                stats,
+                refresh_size=not _size_measured_since(
+                    db, operation_job, not_before=agent_job.claimed_at
+                ),
+            )
         repository.updated_at = _now_utc()
 
     # Archives that no longer exist are recorded on their backup jobs - the
@@ -725,8 +780,238 @@ def _append_agent_job_log(
             received_at=_now_utc(),
         )
     )
-    job.updated_at = _now_utc()
+    if job.status not in FINAL_AGENT_JOB_STATUSES:
+        # A completed job keeps the server time of its completion here; it
+        # anchors the window for lines that arrive after it.
+        job.updated_at = _now_utc()
     return True
+
+
+async def _accept_agent_job_log(
+    job: AgentJob,
+    db: Session,
+    *,
+    sequence: int,
+    stream: str,
+    message: str,
+    created_at: Optional[datetime] = None,
+) -> bool:
+    """Store one log line (False for a sequence already stored) and, when the
+    job had already completed, absorb it into the linked operation. Both
+    transports (the HTTP route and the session handler) end here, so the
+    late-line handling is the same on each. The line is committed first: a
+    resend after a failed commit is then a duplicate and nothing below runs
+    twice. What follows is a side effect and must not fail the transport
+    (a session would be torn down mid-job), so it is fenced; an existing
+    transcript file is appended to only once the statistics have committed,
+    so a failed commit leaves neither half behind. Listeners hear about the
+    operation when its statistics changed: the runner's own broadcast went
+    out at completion, before these lines existed."""
+    accepted = _append_agent_job_log(
+        job,
+        db,
+        sequence=sequence,
+        stream=stream,
+        message=message,
+        created_at=created_at,
+    )
+    db.commit()
+    if not accepted:
+        return False
+    # Read after the commit: the reaper's worker thread may have failed the
+    # job from its own session while this line was being stored.
+    if job.status not in FINAL_AGENT_JOB_STATUSES:
+        # The common case, a line of a running job: nothing to absorb, and
+        # no operation lookup on the request path.
+        return True
+    try:
+        operation_job = _get_repository_operation_job(job, db)
+        if operation_job is None or not _accepts_late_lines(job, operation_job):
+            return True
+        changed = _absorb_late_compact_stats(job, db, message, operation_job)
+        # A transcript that is a column, or a file that does not exist yet
+        # (its path is a column too), is part of this commit; an existing
+        # file is appended to afterwards.
+        append_after_commit = bool(getattr(operation_job, "log_file_path", None))
+        if not append_after_commit:
+            _append_operation_log(operation_job, message)
+        db.commit()
+        if append_after_commit:
+            _append_operation_log(operation_job, message)
+    except Exception as exc:
+        db.rollback()
+        logger.warning(
+            "Late agent log line not absorbed",
+            agent_job_id=job.id,
+            sequence=sequence,
+            error=str(exc),
+        )
+        return True
+    if changed is not None:
+        try:
+            await broadcast_operation_updated(changed, db)
+        except Exception as exc:
+            logger.warning(
+                "Operation update not broadcast",
+                operation_id=changed.id,
+                error=str(exc),
+            )
+    return True
+
+
+def _append_operation_log(operation_job: Any, message: str) -> None:
+    """Add a line that arrived after completion to the transcript the row
+    carries. A row with a log file (every operation, and a legacy row the v2
+    services wrote) gets the line appended to that file, which is what the
+    log readers serve; the facade's `logs` setter is a no-op once the file
+    exists, so the append goes to the file directly. A legacy row without a
+    file keeps the text in `logs`; an operation without a file gets one."""
+    if not message:
+        return
+    path = getattr(operation_job, "log_file_path", None)
+    if not path:
+        if not isinstance(operation_job, MaintenanceJobFacade):
+            operation_job.logs = "\n".join(
+                part for part in (operation_job.logs, message) if part
+            )
+            operation_job.has_logs = True
+            return
+        # Name the file and append to it rather than go through the
+        # facade's setter, which truncates: a file left behind by a commit
+        # that failed after the first late line keeps that line.
+        from app.services.operations.runner import operation_log_path
+
+        resolved = operation_log_path(operation_job.id)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        path = str(resolved)
+        operation_job.operation.log_file_path = path
+    # No check that the file exists: a path with no file behind it is a
+    # transcript whose write failed at completion (the facade's setter
+    # swallows the error), and the late lines are then all there is.
+    # Retention never reaches a file this young.
+    try:
+        with open(path, "ab+") as handle:
+            size = handle.seek(0, 2)
+            if size > 0:
+                handle.seek(size - 1)
+                if handle.read(1) != b"\n":
+                    handle.write(b"\n")
+            handle.write(message.encode("utf-8"))
+    except OSError as exc:
+        logger.warning(
+            "Failed to append to operation log",
+            operation_id=operation_job.id,
+            error=str(exc),
+        )
+
+
+def _size_measured_since(
+    db: Session, operation_job: Any, *, not_before: Optional[datetime] = None
+) -> bool:
+    """Whether the repository size was written after this compact completed:
+    by a `stats` follow-up that measured one (the executors report
+    `size_refreshed`; one that could not measure leaves the compact's figure
+    as the one to use), or by a later compact that reported a size at all:
+    a newer compact's figure beats an older one whatever its precision. A
+    refresh a user triggers by hand writes no operation row and is not seen
+    here. `not_before` bounds the lookback from below with a server-stamped
+    moment (the agent job's claim): the compact's `completed_at` may come
+    from the agent's clock, and a slow one must not reach back to an
+    earlier compact's figure, as a fast one must not reach into the
+    future."""
+    completed_at = getattr(operation_job, "completed_at", None)
+    if completed_at is None or operation_job.repository_id is None:
+        return False
+    since = min(_as_utc(completed_at), _now_utc())
+    if not_before is not None:
+        since = max(since, _as_utc(not_before))
+    since = since.replace(tzinfo=None)
+    rows = db.query(Operation.kind, Operation.result).filter(
+        Operation.repository_id == operation_job.repository_id,
+        Operation.kind.in_(("stats", "compact")),
+        Operation.status.in_(SUCCESS_STATUSES),
+        Operation.completed_at >= since,
+    )
+    if isinstance(operation_job, MaintenanceJobFacade):
+        # A legacy row's id is from another table and excludes nothing.
+        rows = rows.filter(Operation.id != operation_job.id)
+    for kind, result in rows.all():
+        result = result or {}
+        if kind == "stats" and result.get("size_refreshed"):
+            return True
+        stats = result.get("stats") or {}
+        if kind == "compact" and isinstance(stats.get("repository_size"), int):
+            return True
+    return False
+
+
+def _accepts_late_lines(agent_job: AgentJob, operation_job: Any) -> bool:
+    """Whether a log line arriving now still belongs to this operation's
+    transcript. The agent sends its last lines and the completion back to
+    back, and the two are handled on different paths, so a job's tail (a
+    failed compact's error lines, the statistics of a successful one; seen
+    live: 150 ms apart) lands after completion already collected the
+    transcript. A line long after that is a replay."""
+    if agent_job.status not in FINAL_AGENT_JOB_STATUSES:
+        return False
+    if operation_job.status not in TERMINAL_STATUSES:
+        return False
+    finished_at = agent_job.updated_at
+    if finished_at is None:
+        return False
+    now = _now_utc()
+    return now - min(_as_utc(finished_at), now) <= LATE_LOG_ABSORB_WINDOW
+
+
+def _absorb_late_compact_stats(
+    agent_job: AgentJob, db: Session, message: str, operation_job: Any
+) -> Optional[Operation]:
+    """For a successful compact, a statistics line arriving late makes the
+    tail of the transcript get re-collected and parsed: only from the
+    "Repository size" line on, since the block yields nothing before it, so
+    that work stays bounded by the three such lines a compact prints, not
+    by the log length. Returns the operation when its statistics changed."""
+    if _maintenance_kind(operation_job) != "compact":
+        return None
+    if operation_job.status not in ("completed", "completed_with_warnings"):
+        return None
+    if not any(is_stats_closing_line(line) for line in message.splitlines()):
+        return None
+    stats = parse_compact_stats(
+        _collect_agent_log_tail(agent_job, db, COMPACT_STATS_TAIL_LINES)
+    )
+    if not stats:
+        # A closing line without a "Repository size" line within the tail
+        # is not the block this parser knows; say so rather than leave the
+        # size silently unchanged.
+        logger.warning(
+            "Agent compact statistics line did not parse",
+            agent_job_id=agent_job.id,
+            operation_id=operation_job.id,
+            line=message[:200],
+        )
+        return None
+    if stats == getattr(operation_job, "stats", None):
+        return None
+    repository = (
+        db.query(Repository)
+        .filter(Repository.id == operation_job.repository_id)
+        .first()
+    )
+    if repository is None:
+        return None
+    apply_compact_stats(
+        operation_job,
+        repository,
+        stats,
+        refresh_size=not _size_measured_since(
+            db, operation_job, not_before=agent_job.claimed_at
+        ),
+    )
+    repository.updated_at = _now_utc()
+    if isinstance(operation_job, MaintenanceJobFacade):
+        return operation_job.operation
+    return None
 
 
 def _claim_terminal_transition(
@@ -1057,7 +1342,7 @@ async def _handle_agent_session_message(
             job_id=_parse_int(job_id, default=0) or None,
         )
         if job:
-            _append_agent_job_log(
+            await _accept_agent_job_log(
                 job,
                 db,
                 sequence=sequence,
@@ -1065,7 +1350,6 @@ async def _handle_agent_session_message(
                 message=text,
                 created_at=_parse_optional_datetime(message.get("created_at")),
             )
-            db.commit()
         return
 
     if message_type == "command_result":
@@ -1475,31 +1759,15 @@ async def upload_job_log(
     db: Session = Depends(get_db),
 ):
     job = _get_agent_job(job_id, current_agent, db)
-    existing_log = (
-        db.query(AgentJobLog)
-        .filter(
-            AgentJobLog.agent_job_id == job.id,
-            AgentJobLog.sequence == payload.sequence,
-        )
-        .first()
+    accepted = await _accept_agent_job_log(
+        job,
+        db,
+        sequence=payload.sequence,
+        stream=payload.stream,
+        message=payload.message,
+        created_at=payload.created_at,
     )
-    if existing_log:
-        return AgentJobLogResponse(accepted=True, duplicate=True)
-
-    db.add(
-        AgentJobLog(
-            agent_job_id=job.id,
-            sequence=payload.sequence,
-            stream=payload.stream,
-            message=payload.message,
-            created_at=_normalize_agent_timestamp(payload.created_at),
-            received_at=_now_utc(),
-        )
-    )
-    job.updated_at = _now_utc()
-    db.commit()
-
-    return AgentJobLogResponse(accepted=True, duplicate=False)
+    return AgentJobLogResponse(accepted=True, duplicate=not accepted)
 
 
 @router.post("/jobs/{job_id}/complete", response_model=AgentJobStatusResponse)

@@ -41,6 +41,8 @@ logger = structlog.get_logger()
 SOURCE_BORG1_CACHE_STATS = "borg1_cache_stats"
 SOURCE_BORG2_INDEX = "borg2_index"
 SOURCE_STORAGE_USED = "storage_used"
+# Written by the compact paths (maintenance_state), not measured here.
+SOURCE_COMPACT_STATS = "compact_stats"
 
 
 def _port(parts) -> Optional[int]:

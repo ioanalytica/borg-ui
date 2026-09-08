@@ -971,3 +971,55 @@ async def test_repository_busy_fails_after_the_deferral_cap(db, repo, runner, re
     db.expire_all()
     assert db.get(Operation, other_op.id).status == "failed"
     assert (db.get(Operation, other_op.id).params or {}).get("deferrals") is None
+
+
+@pytest.mark.unit
+def test_merged_result_lets_the_executor_win_key_by_key():
+    from app.services.operations.runner import _merged_result
+
+    assert _merged_result(None, None) is None
+    assert _merged_result({"stats": 1}, None) == {"stats": 1}
+    assert _merged_result(None, {"logs": True}) == {"logs": True}
+    assert _merged_result({"stats": 1, "logs": False}, {"logs": True}) == {
+        "stats": 1,
+        "logs": True,
+    }
+    # a requeued row does not inherit the rest of its previous result
+    assert _merged_result({"listed": 3, "logs": True}, {"logs": False}) == {
+        "logs": False
+    }
+    assert _merged_result({"listed": 3}, None) is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_result_keeps_what_another_session_filed_while_the_executor_ran(
+    db, repo, runner, registry, session_factory
+):
+    """An agent's late statistics land on the row from a request's session
+    after the executor loaded its copy. The runner merges with the row as
+    stored, not with its session's stale copy, so those keys survive its
+    own result write (spec 6.1)."""
+
+    async def record(ctx: OperationContext):
+        assert ctx.operation.result is None  # loaded into the runner's session
+        other = session_factory()
+        try:
+            other.get(Operation, ctx.operation_id).result = {
+                "stats": {"repository_size": 1},
+                "stale": True,
+            }
+            other.commit()
+        finally:
+            other.close()
+        # No commit here: the runner's copy still says None.
+        return Outcome(result={"logs": True})
+
+    registry["compact"] = record
+    op = enqueue(db, "compact", repository_id=repo.id)
+    await _drain(runner)
+    db.expire_all()
+    assert db.get(Operation, op.id).result == {
+        "stats": {"repository_size": 1},
+        "logs": True,
+    }

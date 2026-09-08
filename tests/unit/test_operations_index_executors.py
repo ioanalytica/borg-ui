@@ -261,6 +261,7 @@ async def test_run_stats_writes_total_size(db, repo, monkeypatch):
         "objects": 3,
         "source": "borg2_index",
         "last_modified": "2026-09-06T08:57:17",
+        "size_refreshed": True,
     }
     db.refresh(repo)
     assert repo.total_size == "2.00 KB"
@@ -329,7 +330,7 @@ async def test_run_stats_agent_repository_leaves_size_alone_when_unmeasurable(
         index_exec, "_prepare_repository_borg_env", lambda repository, db: ({}, None)
     )
 
-    async def fake_update(repository, session):
+    async def fake_update(repository, session, **kwargs):
         return True
 
     monkeypatch.setattr(
@@ -337,7 +338,11 @@ async def test_run_stats_agent_repository_leaves_size_alone_when_unmeasurable(
     )
     with patch.object(index_exec, "_publish_mqtt_state"):
         outcome = await index_exec.run_stats(_ctx(db, repo, kind="stats"))
-    assert outcome.result == {"total_size": "keep", "executor": "agent"}
+    assert outcome.result == {
+        "total_size": "keep",
+        "executor": "agent",
+        "size_refreshed": False,
+    }
     db.refresh(repo)
     assert repo.total_size == "keep"
 
@@ -1002,8 +1007,10 @@ async def test_run_stats_refreshes_agent_repository_through_the_agent(
         index_exec, "_prepare_repository_borg_env", lambda repository, db: ({}, None)
     )
 
-    async def fake_update(repository, session):
+    async def fake_update(repository, session, *, report=None):
         repository.total_size = "5.0 GB"
+        if report is not None:
+            report.size_written = True
         session.commit()
         return True
 
@@ -1014,6 +1021,7 @@ async def test_run_stats_refreshes_agent_repository_through_the_agent(
         outcome = await index_exec.run_stats(_ctx(db, repo, kind="stats"))
     assert outcome.status == "completed"
     assert outcome.result["total_size"] == "5.0 GB"
+    assert outcome.result["size_refreshed"] is True
 
 
 @pytest.mark.unit
@@ -1024,7 +1032,7 @@ async def test_run_stats_fails_when_agent_refresh_fails(db, repo, monkeypatch):
         index_exec, "_prepare_repository_borg_env", lambda repository, db: ({}, None)
     )
 
-    async def fake_update(repository, session):
+    async def fake_update(repository, session, **kwargs):
         return False
 
     monkeypatch.setattr(

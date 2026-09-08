@@ -481,17 +481,28 @@ async def run_stats(ctx) -> Outcome:
         # disk_usage for Borg 2) and also refreshes encryption. The retired
         # stats refresh loop called this for every repository; without it
         # agent repositories would never refresh size in the background.
-        from app.api.repositories import _update_agent_repository_stats
+        from app.api.repositories import (
+            AgentStatsReport,
+            _update_agent_repository_stats,
+        )
 
-        updated = await _update_agent_repository_stats(repository, db)
+        report = AgentStatsReport()
+        updated = await _update_agent_repository_stats(repository, db, report=report)
         if not updated:
             return Outcome(
                 status="failed", error_message="agent repository stats refresh failed"
             )
         _publish_mqtt_state(db, "operations stats")
         ctx.log(f"agent repository size {repository.total_size}")
+        # `size_refreshed`: whether this run wrote the size. A later reader
+        # (a compact's statistics arriving after this run) keeps a size only
+        # when it was measured here, not merely left standing.
         return Outcome(
-            result={"total_size": repository.total_size, "executor": "agent"}
+            result={
+                "total_size": repository.total_size,
+                "executor": "agent",
+                "size_refreshed": report.size_written,
+            }
         )
     env, temp_key_file = _prepare_repository_borg_env(repository, db)
     try:
@@ -533,6 +544,7 @@ async def run_stats(ctx) -> Outcome:
                 "last_modified": measured.last_modified.isoformat()
                 if measured.last_modified
                 else None,
+                "size_refreshed": bool(measured.bytes),
             }
         )
     finally:

@@ -101,6 +101,32 @@ class Outcome:
             raise ValueError(f"Invalid outcome status: {self.status!r}")
 
 
+# Keys a service files on the row while its executor runs and the runner's
+# own result write must not drop (a compact's statistics, recorded by the
+# service or by an agent's log lines that arrive after its completion, spec
+# 6.1). Anything else on the row is the executor's to return again; a row
+# requeued after a deferral or a restart does not inherit its old result.
+PRESERVED_RESULT_KEYS = ("stats",)
+
+
+def _merged_result(stored, returned):
+    """`result` as the runner finalises it: what the executor returned, plus
+    the preserved keys the row holds. The stored value is read back from the
+    table rather than from this session's copy, which the executor may have
+    loaded before that other write committed. The other writer runs on this
+    event loop and does not await between its read and its commit, and
+    neither does the caller below, so the two read-modify-writes cannot
+    interleave."""
+    preserved = {
+        key: value
+        for key, value in (stored or {}).items()
+        if key in PRESERVED_RESULT_KEYS
+    }
+    if not preserved:
+        return returned
+    return {**preserved, **(returned or {})}
+
+
 def operation_log_path(operation_id: int) -> Path:
     return Path(app_config.settings.data_dir) / "logs" / f"operation_{operation_id}.log"
 
@@ -465,7 +491,10 @@ class OperationRunner:
                 op.status = "cancelled"
             else:
                 op.status = outcome.status
-            op.result = outcome.result
+            op.result = _merged_result(
+                db.query(Operation.result).filter(Operation.id == op.id).scalar(),
+                outcome.result,
+            )
             op.skip_reason = outcome.skip_reason
             op.error_message = outcome.error_message
             op.completed_at = utc_now()
