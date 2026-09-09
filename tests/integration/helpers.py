@@ -46,7 +46,10 @@ class DockerPathHelper:
         # Determine if backend server is running in Docker container
         # Port-based detection: 8081/8082 = Docker, 8000 = local dev
         # Can be overridden with container_mode parameter or BORG_UI_CONTAINER env var
-        is_container_port = base_url.endswith(":8081") or base_url.endswith(":8082")
+        normalized_base_url = base_url.rstrip("/")
+        is_container_port = normalized_base_url.endswith(
+            ":8081"
+        ) or normalized_base_url.endswith(":8082")
         env_container_mode = os.environ.get("BORG_UI_CONTAINER", "").lower() in (
             "true",
             "1",

@@ -8,12 +8,15 @@ when multiple files share the same parent directory.
 """
 
 import asyncio
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Add parent directory to path to import app modules
 sys.path.insert(0, str(Path(__file__).parent))
 
+from app.config import settings
 from app.services.mount_service import MountService, MountInfo, MountType
 from unittest.mock import Mock, AsyncMock, patch
 from datetime import datetime, timezone
@@ -40,7 +43,32 @@ class IntegrationTest:
         print(f"  ✓ {message}")
 
 
-async def test_1_multiple_files_same_parent():
+def _fresh_service() -> MountService:
+    """A MountService built against a scratch data directory.
+
+    The constructor reads and reconciles DATA_DIR/mount_state.json, which the
+    whole process shares, and every later persist writes it back. The tests
+    below assert absolute mount counts, and a run via main() on a box with
+    live mounts must not read or truncate the real file. The constructor also
+    sweeps /tmp/sshfs_mount_* for orphans, which on such a box could remove
+    the directory of a live legacy mount; the tests do not need that sweep.
+    """
+    scratch = tempfile.mkdtemp(prefix="mount-test-data-")
+    with (
+        patch.object(settings, "data_dir", scratch),
+        patch.object(MountService, "_cleanup_orphaned_temp_dirs"),
+    ):
+        return MountService()
+
+
+def _scratch_key_file() -> str:
+    """A key file the test owns. unmount() unlinks the path it was given."""
+    handle, path = tempfile.mkstemp(prefix="mount-test-key-")
+    os.close(handle)
+    return path
+
+
+async def _1_multiple_files_same_parent():
     """
     Test: Multiple files from same parent
     Expected: Only ONE mount created, but mount_id appears multiple times in result
@@ -50,7 +78,7 @@ async def test_1_multiple_files_same_parent():
     print("=" * 80)
 
     test = IntegrationTest()
-    service = MountService()
+    service = _fresh_service()
 
     # Mock database and SSH components
     with patch("app.services.mount_service.SessionLocal") as mock_db:
@@ -85,7 +113,7 @@ async def test_1_multiple_files_same_parent():
         with patch.object(service, "_check_sshfs_available", return_value=True):
             # Mock key decryption
             with patch.object(
-                service, "_decrypt_and_write_key", return_value="/tmp/test_key"
+                service, "_decrypt_and_write_key", return_value=_scratch_key_file()
             ):
                 # Mock file type check (all files)
                 with patch.object(service, "_check_remote_is_file", return_value=True):
@@ -243,7 +271,7 @@ async def test_1_multiple_files_same_parent():
                             return True
 
 
-async def test_2_files_different_parents():
+async def _2_files_different_parents():
     """
     Test: Files from different parent directories
     Expected: Multiple mounts created, one per unique parent
@@ -253,7 +281,7 @@ async def test_2_files_different_parents():
     print("=" * 80)
 
     test = IntegrationTest()
-    service = MountService()
+    service = _fresh_service()
 
     with patch("app.services.mount_service.SessionLocal") as mock_db:
         mock_session = Mock()
@@ -282,7 +310,7 @@ async def test_2_files_different_parents():
 
         with patch.object(service, "_check_sshfs_available", return_value=True):
             with patch.object(
-                service, "_decrypt_and_write_key", return_value="/tmp/test_key"
+                service, "_decrypt_and_write_key", return_value=_scratch_key_file()
             ):
                 with patch.object(service, "_check_remote_is_file", return_value=True):
                     with patch.object(
@@ -354,7 +382,7 @@ async def test_2_files_different_parents():
                             return True
 
 
-async def test_3_mixed_files_and_directories():
+async def _3_mixed_files_and_directories():
     """
     Test: Mix of files and directories, some sharing parents
     Expected: Deduplication for files in same parent, separate mounts for directories
@@ -364,7 +392,7 @@ async def test_3_mixed_files_and_directories():
     print("=" * 80)
 
     test = IntegrationTest()
-    service = MountService()
+    service = _fresh_service()
 
     with patch("app.services.mount_service.SessionLocal") as mock_db:
         mock_session = Mock()
@@ -404,7 +432,7 @@ async def test_3_mixed_files_and_directories():
 
         with patch.object(service, "_check_sshfs_available", return_value=True):
             with patch.object(
-                service, "_decrypt_and_write_key", return_value="/tmp/test_key"
+                service, "_decrypt_and_write_key", return_value=_scratch_key_file()
             ):
                 with patch.object(
                     service, "_check_remote_is_file", side_effect=mock_check_file
@@ -474,7 +502,7 @@ async def test_3_mixed_files_and_directories():
                             return True
 
 
-async def test_4_cleanup_with_duplicate_mount_ids():
+async def _4_cleanup_with_duplicate_mount_ids():
     """
     Test: Verify that cleanup handles duplicate mount_ids gracefully
     This is the KEY test that exposes the real-world bug
@@ -484,7 +512,7 @@ async def test_4_cleanup_with_duplicate_mount_ids():
     print("=" * 80)
 
     test = IntegrationTest()
-    service = MountService()
+    service = _fresh_service()
 
     # Simulate what backup_service actually does
     print("\nSimulating backup_service cleanup flow:")
@@ -492,16 +520,20 @@ async def test_4_cleanup_with_duplicate_mount_ids():
     print("2. backup_service stores: mount_ids = [mid, mid, mid, ...]")
     print("3. backup_service cleanup loops: for mid in mount_ids: unmount(mid)")
 
-    # Create ONE actual mount
+    # Create ONE actual mount. unmount() removes temp_root and temp_key_file
+    # for real, so they must be this test's own scratch paths.
+    temp_root = tempfile.mkdtemp(prefix="mount-integration-")
+    temp_key_file = os.path.join(temp_root, "key")
+    open(temp_key_file, "w").close()
     mount_id = "test-mount-123"
     service.active_mounts[mount_id] = MountInfo(
         mount_id=mount_id,
         mount_type=MountType.SSHFS,
-        mount_point="/tmp/test/home/user",
+        mount_point=os.path.join(temp_root, "home/user"),
         source="ssh://user@host/home/user",
         created_at=datetime.now(timezone.utc),
-        temp_root="/tmp/test",
-        temp_key_file="/tmp/key",
+        temp_root=temp_root,
+        temp_key_file=temp_key_file,
     )
 
     print(f"\nCreated 1 actual mount: {mount_id}")
@@ -549,43 +581,37 @@ async def test_4_cleanup_with_duplicate_mount_ids():
     print(f"  exists_after: {first_unmount['exists_after']}")
     print(f"  success: {first_unmount['success']}")
 
-    if (
-        first_unmount["exists_before"]
-        and not first_unmount["exists_after"]
-        and first_unmount["success"]
-    ):
-        print(f"  ✅ First unmount worked correctly")
-    else:
-        print(f"  ❌ First unmount had issues")
+    test.assert_equal(
+        (
+            first_unmount["exists_before"],
+            first_unmount["exists_after"],
+            first_unmount["success"],
+        ),
+        (True, False, True),
+        "First unmount removes the mount and reports success",
+    )
 
     print(f"\nSubsequent unmounts (attempts 2-3):")
-    all_handled_gracefully = True
     for attempt in subsequent_unmounts:
         print(f"  Attempt {attempt['attempt']}:")
         print(f"    exists_before: {attempt['exists_before']}")
         print(f"    success: {attempt['success']}")
 
-        if not attempt["exists_before"] and attempt["success"] == False:
-            print(f"    ✅ Correctly returned False for already-unmounted mount")
-        elif not attempt["exists_before"]:
-            print(f"    ⚠️  Returned {attempt['success']} for already-unmounted mount")
-        else:
-            print(f"    ❌ Mount still existed (should have been removed!)")
-            all_handled_gracefully = False
+        test.assert_equal(
+            attempt["exists_before"], False, "Mount already removed before retry"
+        )
+        test.assert_equal(
+            attempt["success"], False, "Unmount of an absent mount reports False"
+        )
 
     # VERIFY: All mounts cleaned up
     test.assert_equal(len(service.active_mounts), 0, "All mounts should be cleaned up")
-
-    if all_handled_gracefully:
-        print("\n✅ Current approach handles duplicates gracefully")
-    else:
-        print("\n❌ Current approach has issues with duplicates")
 
     print("\n✅ TEST PASSED")
     return True
 
 
-async def test_5_overlapping_paths_no_shadowing():
+async def _5_overlapping_paths_no_shadowing():
     """
     Test: Overlapping paths (parent + child) should NOT cause mount shadowing
     This is the CRITICAL test for the data loss bug reported in GitHub issue
@@ -601,7 +627,7 @@ async def test_5_overlapping_paths_no_shadowing():
     print("GitHub issue: Mounting /etc after /etc/cron.d causes shadowing")
 
     test = IntegrationTest()
-    service = MountService()
+    service = _fresh_service()
 
     with patch("app.services.mount_service.SessionLocal") as mock_db:
         mock_session = Mock()
@@ -639,7 +665,7 @@ async def test_5_overlapping_paths_no_shadowing():
 
         with patch.object(service, "_check_sshfs_available", return_value=True):
             with patch.object(
-                service, "_decrypt_and_write_key", return_value="/tmp/test_key"
+                service, "_decrypt_and_write_key", return_value=_scratch_key_file()
             ):
                 with patch.object(
                     service, "_check_remote_is_file", side_effect=mock_check_file
@@ -750,7 +776,7 @@ async def test_5_overlapping_paths_no_shadowing():
                             return True
 
 
-async def test_6_deeply_nested_paths():
+async def _6_deeply_nested_paths():
     """
     Test: Multiple levels of nesting should all reuse the shallowest parent
     Example: /var, /var/log, /var/log/app, /var/log/app/debug.log
@@ -761,7 +787,7 @@ async def test_6_deeply_nested_paths():
     print("=" * 80)
 
     test = IntegrationTest()
-    service = MountService()
+    service = _fresh_service()
 
     with patch("app.services.mount_service.SessionLocal") as mock_db:
         mock_session = Mock()
@@ -794,7 +820,7 @@ async def test_6_deeply_nested_paths():
 
         with patch.object(service, "_check_sshfs_available", return_value=True):
             with patch.object(
-                service, "_decrypt_and_write_key", return_value="/tmp/test_key"
+                service, "_decrypt_and_write_key", return_value=_scratch_key_file()
             ):
                 with patch.object(
                     service, "_check_remote_is_file", side_effect=mock_check_file
@@ -875,6 +901,45 @@ async def test_6_deeply_nested_paths():
                             return True
 
 
+# pytest entry points. The runners above print their findings and answer
+# with True/False (they are also driven by main() below); a False or a
+# swallowed exception must fail the test, not pass it.
+async def test_1_multiple_files_same_parent():
+    assert await _1_multiple_files_same_parent(), (
+        "runner reported a failure, see the captured output"
+    )
+
+
+async def test_2_files_different_parents():
+    assert await _2_files_different_parents(), (
+        "runner reported a failure, see the captured output"
+    )
+
+
+async def test_3_mixed_files_and_directories():
+    assert await _3_mixed_files_and_directories(), (
+        "runner reported a failure, see the captured output"
+    )
+
+
+async def test_4_cleanup_with_duplicate_mount_ids():
+    assert await _4_cleanup_with_duplicate_mount_ids(), (
+        "runner reported a failure, see the captured output"
+    )
+
+
+async def test_5_overlapping_paths_no_shadowing():
+    assert await _5_overlapping_paths_no_shadowing(), (
+        "runner reported a failure, see the captured output"
+    )
+
+
+async def test_6_deeply_nested_paths():
+    assert await _6_deeply_nested_paths(), (
+        "runner reported a failure, see the captured output"
+    )
+
+
 async def main():
     """Run all integration tests"""
     print("\n" + "█" * 80)
@@ -886,23 +951,21 @@ async def main():
 
     try:
         results.append(
-            ("Multiple files same parent", await test_1_multiple_files_same_parent())
+            ("Multiple files same parent", await _1_multiple_files_same_parent())
         )
     except Exception as e:
         print(f"\n❌ TEST FAILED: {e}")
         results.append(("Multiple files same parent", False))
 
     try:
-        results.append(
-            ("Files different parents", await test_2_files_different_parents())
-        )
+        results.append(("Files different parents", await _2_files_different_parents()))
     except Exception as e:
         print(f"\n❌ TEST FAILED: {e}")
         results.append(("Files different parents", False))
 
     try:
         results.append(
-            ("Mixed files and directories", await test_3_mixed_files_and_directories())
+            ("Mixed files and directories", await _3_mixed_files_and_directories())
         )
     except Exception as e:
         print(f"\n❌ TEST FAILED: {e}")
@@ -910,7 +973,7 @@ async def main():
 
     try:
         results.append(
-            ("Cleanup with duplicates", await test_4_cleanup_with_duplicate_mount_ids())
+            ("Cleanup with duplicates", await _4_cleanup_with_duplicate_mount_ids())
         )
     except Exception as e:
         print(f"\n❌ TEST FAILED: {e}")
@@ -920,7 +983,7 @@ async def main():
         results.append(
             (
                 "Overlapping paths (NO SHADOWING)",
-                await test_5_overlapping_paths_no_shadowing(),
+                await _5_overlapping_paths_no_shadowing(),
             )
         )
     except Exception as e:
@@ -928,7 +991,7 @@ async def main():
         results.append(("Overlapping paths (NO SHADOWING)", False))
 
     try:
-        results.append(("Deeply nested paths", await test_6_deeply_nested_paths()))
+        results.append(("Deeply nested paths", await _6_deeply_nested_paths()))
     except Exception as e:
         print(f"\n❌ TEST FAILED: {e}")
         results.append(("Deeply nested paths", False))

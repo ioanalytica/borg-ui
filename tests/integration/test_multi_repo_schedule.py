@@ -10,9 +10,9 @@ from app.utils.archive_names import sanitize_archive_component
 from tests.utils.borg import create_registered_local_repository, run_borg
 
 try:
-    from .test_helpers import make_borg_env
+    from .helpers import make_borg_env
 except ImportError:
-    from test_helpers import make_borg_env
+    from helpers import make_borg_env
 
 
 @pytest.mark.integration
