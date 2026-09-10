@@ -12,7 +12,7 @@ import structlog
 from app.database.models import Operation, Repository
 from app.services.operations import executors
 from app.services.operations.enqueue import enqueue_chain
-from app.services.operations.followups import chain_for, history_enabled
+from app.services.operations.followups import chain_for
 from app.services.operations.runner import Outcome
 from app.services.operations.wipe_facade import (
     PHASE_DELETE_FAILED_PARTIAL,
@@ -55,11 +55,8 @@ async def run_wipe(ctx) -> Outcome:
         # repository, so the index chain is queued here, with no dependency on
         # the failed row, to keep the archive list and stats honest
         # (Appendix B, phase 6 review).
-        kinds = chain_for(
-            "wipe",
-            available=executors.registered_kinds(),
-            history=history_enabled(ctx.db),
-        )
+        # the wipe chain has no plan-gated kind, so no gate to look up
+        kinds = chain_for("wipe", available=executors.registered_kinds())
         if kinds:
             enqueue_chain(
                 ctx.db,

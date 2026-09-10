@@ -289,3 +289,37 @@ def test_a_failed_bootstrap_releases_its_claim(db, repos, monkeypatch):
         reconcile.bootstrap_history_once(db)
 
     assert db.query(SystemSettings).first().history_bootstrap_at is None
+
+
+@pytest.mark.unit
+def test_enqueue_reconcile_run_omits_history_index_for_an_agent_repository(
+    db, monkeypatch
+):
+    """The history stage does not exist for an agent's repository (the
+    server cannot diff it), so the reconcile chain never creates it there,
+    while a server-side repository on the same install keeps it."""
+    monkeypatch.setattr(
+        reconcile,
+        "registered_kinds",
+        lambda: {"archive_sync", "history_merge", "history_index", "stats"},
+    )
+    server = Repository(name="server", path="/repo/server", borg_version=1)
+    agent = Repository(
+        name="agent",
+        path="/repo/agent",
+        borg_version=1,
+        executor_type="agent",
+        execution_target="agent",
+    )
+    db.add_all([server, agent])
+    db.commit()
+
+    kinds_server = [
+        o.kind for o in reconcile.enqueue_reconcile_run(db, server.id, history=True)
+    ]
+    kinds_agent = [
+        o.kind for o in reconcile.enqueue_reconcile_run(db, agent.id, history=True)
+    ]
+
+    assert kinds_server == ["archive_sync", "history_merge", "history_index", "stats"]
+    assert kinds_agent == ["archive_sync", "history_merge", "stats"]

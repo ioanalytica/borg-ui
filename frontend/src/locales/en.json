@@ -1096,7 +1096,8 @@
       "showMore": "Show more",
       "filterLabel": "Change type",
       "delta": "{{sign}}{{size}}",
-      "summaryFolder": "Folder"
+      "summaryFolder": "Folder",
+      "agentUnsupported": "Change history is not available for repositories executed by an agent."
     },
     "files": {
       "size": "Size",
@@ -1125,7 +1126,12 @@
       "historyEmpty": "No earlier archive contains this path.",
       "type": "Type",
       "typeFile": "File",
-      "typeDirectory": "Folder"
+      "typeDirectory": "Folder",
+      "historyUnavailableAgent": "Change history is not available for repositories executed by an agent.",
+      "historyNotIndexed": "This repository has not been indexed yet.",
+      "historyCoverage": "{{indexed}} of {{total}} archives indexed",
+      "historyEmptyIndexed": "None of the indexed archives contains this path.",
+      "historyFailed": "This repository could not be indexed."
     },
     "toolbarOperations": "Operations",
     "hourly": {
@@ -3661,7 +3667,8 @@
         "detailAttempts_other": "{{count}} attempts",
         "detailAllIndexed": "Every archive has its file history.",
         "detailHint": "Rebuild from File history to index these archives again.",
-        "viewIndexRuns": "View index runs"
+        "viewIndexRuns": "View index runs",
+        "historyAgentUnsupported": "Not available for agent repositories"
       },
       "rebuildMenuHint": "Every stage after the one you pick is rebuilt too. Earlier stages are kept. Stats always run last, because they total up what the other stages produced.",
       "rebuildTitle": "Rebuild derived data",
@@ -3669,7 +3676,8 @@
       "stageWillRebuild": "Will rebuild",
       "stageKept": "Kept",
       "stageStart": "Start here",
-      "currentRun": "Current run"
+      "currentRun": "Current run",
+      "stageAgentUnsupported": "Not available for repositories executed by an agent"
     },
     "status": {
       "queued": "Queued",
@@ -5901,7 +5909,8 @@
         "failedListArchives": "Failed to list archives",
         "repositoryNotFound": "Repository not found",
         "fileNotFoundAfterExtraction": "File not found after extraction",
-        "failedExtractFile": "Failed to extract file: {{error}}"
+        "failedExtractFile": "Failed to extract file: {{error}}",
+        "historyUnavailableForAgent": "Change history is not available for repositories executed by an agent, so there is nothing to rebuild."
       },
       "borg": {
         "repositoryDoesNotExist": "Repository does not exist at the specified path",

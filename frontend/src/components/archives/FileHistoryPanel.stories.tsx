@@ -135,3 +135,66 @@ export const Locked: Story = {
     systemInfo: communitySystemInfo,
   },
 }
+
+// The panel says what its answer is based on. A repository executed by an
+// agent has no index at all (the server cannot diff it), and a repository
+// indexed only in part covers the indexed archives only; both seed a
+// history of their own under a different path so the decorator's full
+// index is left alone.
+function SeededCoverage({
+  children,
+  storyPath,
+  response,
+}: {
+  children: ReactNode
+  storyPath: string
+  response: PathHistoryResponse
+}) {
+  const queryClient = useQueryClient()
+  useState(() => {
+    queryClient.setQueryData(['path-history', repositoryId, storyPath], response)
+    return null
+  })
+  return <>{children}</>
+}
+
+const agentPath = 'etc/hosts'
+const partialPath = 'home/karan/notes.md'
+
+export const AgentUnsupported: Story = {
+  args: { path: agentPath },
+  parameters: { systemInfo: proSystemInfo },
+  render: (args) => (
+    <SeededCoverage
+      storyPath={agentPath}
+      response={{
+        path: agentPath,
+        entries: [],
+        present: [],
+        present_in_latest: false,
+        coverage: { indexed: 0, exhausted: 0, total: 12, capability: 'agent_unsupported' },
+      }}
+    >
+      <FileHistoryPanel {...args} />
+    </SeededCoverage>
+  ),
+}
+
+export const PartiallyIndexed: Story = {
+  args: { path: partialPath },
+  parameters: { systemInfo: proSystemInfo },
+  render: (args) => (
+    <SeededCoverage
+      storyPath={partialPath}
+      response={{
+        path: partialPath,
+        entries: [entry({ archive_id: 3, archive_name: 'daily-2026-09-03' })],
+        present: [{ series, from_archive_id: 3, to_archive_id: null }],
+        present_in_latest: true,
+        coverage: { indexed: 3, exhausted: 0, total: 12, capability: 'available' },
+      }}
+    >
+      <FileHistoryPanel {...args} />
+    </SeededCoverage>
+  ),
+}

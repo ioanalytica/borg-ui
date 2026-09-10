@@ -135,17 +135,17 @@ def record_import_connect(
     """
     from app.database.models import utc_now
     from app.services.operations.executors import registered_kinds
-    from app.services.operations.followups import chain_for, history_enabled
+    from app.services.operations.followups import chain_for, history_possible
 
     # Resolve the chain before the row exists: the plan lookup behind
-    # history_enabled commits the session, and a flushed import_connect row
+    # history_possible commits the session, and a flushed import_connect row
     # committed that way would outlive a failure in the enqueue step below as
     # an orphan without its follow-ups, beyond the reach of the caller's
     # rollback.
     kinds = chain_for(
         "import_connect",
         available=registered_kinds(),
-        history=history_enabled(db),
+        history=history_possible(db, repository),
     )
     now = utc_now()
     op = Operation(

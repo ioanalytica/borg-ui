@@ -2436,6 +2436,110 @@ class TestRepositoriesUpdate:
 
         assert response.status_code == 200
 
+    def test_moving_a_repository_back_to_the_server_reopens_its_history(
+        self, test_client: TestClient, admin_headers, test_db
+    ):
+        """An agent's archives carry `skipped` (no history run reaches them);
+        once the server executes the repository the history stage exists
+        again, so they go back to `pending` for the next index run."""
+        from app.database.models import Archive
+
+        repo = Repository(
+            name="Moved Back",
+            path="/repos/moved-back",
+            encryption="none",
+            repository_type="local",
+            executor_type="agent",
+            execution_target="agent",
+        )
+        test_db.add(repo)
+        test_db.commit()
+        test_db.refresh(repo)
+        for i, state in enumerate(("skipped", "skipped", "indexed")):
+            test_db.add(
+                Archive(
+                    repository_id=repo.id,
+                    borg_id=f"id-{i}",
+                    name=f"a{i}",
+                    series="nas",
+                    start=datetime(2026, 9, 1 + i, 2),
+                    history_state=state,
+                )
+            )
+        test_db.commit()
+
+        from app.services.operations.executors import load_default_executors
+
+        load_default_executors()  # the queued run needs registered kinds
+        with patch("app.api.repositories.mqtt_service.sync_state_with_db"):
+            response = test_client.put(
+                f"/api/repositories/{repo.id}",
+                json={"executor_type": "server"},
+                headers=admin_headers,
+            )
+
+        assert response.status_code == 200, response.text
+        test_db.expire_all()
+        states = sorted(
+            a.history_state
+            for a in test_db.query(Archive).filter_by(repository_id=repo.id)
+        )
+        assert states == ["indexed", "pending", "pending"]
+
+    def test_moving_a_repository_to_an_agent_leaves_its_archive_states_alone(
+        self, test_client: TestClient, admin_headers, test_db
+    ):
+        """The other direction changes nothing on the rows: an index built on
+        the server stays (the Changes tab still serves it), and `pending`
+        archives are marked `skipped` by the next listing, not here."""
+        from app.database.models import Archive
+
+        agent = AgentMachine(
+            name="Taker",
+            agent_id="agt_taker",
+            token_hash=get_password_hash("borgui_agent_secret"),
+            token_prefix="borgui_agent_secret"[:20],
+            status="online",
+            capabilities=["repository.init"],
+        )
+        repo = Repository(
+            name="Moved Out",
+            path="/repos/moved-out",
+            encryption="none",
+            repository_type="local",
+        )
+        test_db.add_all([agent, repo])
+        test_db.commit()
+        test_db.refresh(repo)
+        for i, state in enumerate(("indexed", "pending")):
+            test_db.add(
+                Archive(
+                    repository_id=repo.id,
+                    borg_id=f"id-{i}",
+                    name=f"a{i}",
+                    series="nas",
+                    start=datetime(2026, 9, 1 + i, 2),
+                    history_state=state,
+                )
+            )
+        test_db.commit()
+
+        with patch("app.api.repositories.mqtt_service.sync_state_with_db"):
+            response = test_client.put(
+                f"/api/repositories/{repo.id}",
+                json={"executor_type": "agent", "agent_machine_id": agent.id},
+                headers=admin_headers,
+            )
+
+        assert response.status_code == 200, response.text
+        test_db.expire_all()
+        assert test_db.get(Repository, repo.id).executor_type == "agent"
+        states = sorted(
+            a.history_state
+            for a in test_db.query(Archive).filter_by(repository_id=repo.id)
+        )
+        assert states == ["indexed", "pending"]
+
     def test_update_repository_clear_source_connection_id(
         self, test_client: TestClient, admin_headers, test_db
     ):

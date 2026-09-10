@@ -23,6 +23,10 @@ from app.config import settings
 from app.core.borg_router import BorgRouter
 from app.database.models import Archive, Repository, SystemSettings, utc_now
 from app.services.operations import executors
+from app.services.operations.followups import (
+    HISTORY_AGENT_UNSUPPORTED,
+    history_capability,
+)
 from app.services.operations.runner import Outcome, repository_busy
 from app.services.operations.series import infer_series, series_prefixes_for_repository
 from app.services.repository_command_lock import run_serialized_repository_command
@@ -588,6 +592,27 @@ async def run_archive_sync(ctx) -> Outcome:
         new_rows, removed_ids = apply_listing(
             db, repository, entries, timezone_name=timezone_name
         )
+        # the executor check is a plain attribute read; the plan lookup behind
+        # the capability commits, so it runs only where the answer can matter
+        if (
+            is_agent_executor(repository)
+            and history_capability(db, repository) == HISTORY_AGENT_UNSUPPORTED
+        ):
+            # No history run ever reaches an agent's repository (the server
+            # cannot diff it), so the listing records the state the history
+            # run used to write: `skipped`, not a `pending` that would read
+            # as "not yet". Only where the plan has the feature: on Community
+            # the stage is absent for every repository and `pending` stays
+            # what it is, so a later plan or executor change finds it.
+            # `failed` is marked too: nothing can retry it here, and a row
+            # left `failed` would flag the repository and offer a rebuild that
+            # is refused. Moving the repository back to the server reopens
+            # every `skipped` archive with a fresh retry budget.
+            db.query(Archive).filter(
+                Archive.repository_id == repository.id,
+                Archive.history_state.in_(("pending", "failed")),
+            ).update({Archive.history_state: "skipped"}, synchronize_session=False)
+            db.commit()
         filled = await fill_archive_info(
             db,
             repository,

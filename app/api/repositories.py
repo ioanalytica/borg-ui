@@ -17,6 +17,7 @@ import uuid
 from app.database.database import get_db, SessionLocal
 from app.database.models import (
     AgentMachine,
+    Archive,
     CheckJob,
     CompactJob,
     DEFAULT_HISTORY_INDEX_EXCLUDES,
@@ -5067,6 +5068,8 @@ async def update_repository(
         executor_changed = (
             "executor_type" in update_data or repo_data.execution_target is not None
         )
+        previous_executor_type = repository_executor_type(repository)
+        reopen_history = False
         if executor_changed:
             if target_executor_type == "agent":
                 requested_agent_id = (
@@ -5090,6 +5093,9 @@ async def update_repository(
                     repository_location="ssh" if repository.connection_id else "local",
                 )
                 repository.agent_machine_id = None
+                # An agent's archives carry `skipped`; reopened below, once
+                # the update itself is committed.
+                reopen_history = previous_executor_type == "agent"
 
         elif (
             "connection_id" in update_data
@@ -5123,6 +5129,31 @@ async def update_repository(
 
         repository.updated_at = datetime.utcnow()
         db.commit()
+
+        if reopen_history:
+            # On the server the history stage exists again: the archives an
+            # agent left `skipped` go back to `pending` with a fresh retry
+            # budget, and an index run is queued rather than left to the
+            # hourly reconcile. After the update's own commit, since the
+            # queueing reads the plan and commits on its own.
+            from app.services.operations.reconcile import enqueue_reconcile_run
+
+            try:
+                db.query(Archive).filter(
+                    Archive.repository_id == repository.id,
+                    Archive.history_state == "skipped",
+                ).update(
+                    {Archive.history_state: "pending", Archive.history_attempts: 0},
+                    synchronize_session=False,
+                )
+                enqueue_reconcile_run(db, repository.id)
+            except Exception as e:
+                db.rollback()
+                logger.error(
+                    "Failed to reopen the archive history after the executor change",
+                    repo_id=repository.id,
+                    error=str(e),
+                )
 
         if sync_cloud_mirror_after_update:
             try:

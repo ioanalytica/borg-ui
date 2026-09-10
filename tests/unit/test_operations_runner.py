@@ -262,7 +262,7 @@ async def test_followups_skip_history_kinds_on_community(
     registry["stats"] = ok
 
     monkeypatch.setattr(
-        "app.services.operations.runner.history_enabled", lambda db: False
+        "app.services.operations.followups.history_enabled", lambda db: False
     )
     enqueue(db, "backup", repository_id=repo.id, trigger="manual")
     await _drain(runner)
@@ -285,7 +285,7 @@ async def test_followups_include_history_kinds_on_pro(
     registry["stats"] = ok
 
     monkeypatch.setattr(
-        "app.services.operations.runner.history_enabled", lambda db: True
+        "app.services.operations.followups.history_enabled", lambda db: True
     )
     enqueue(db, "backup", repository_id=repo.id, trigger="manual")
     await _drain(runner)
@@ -295,6 +295,50 @@ async def test_followups_include_history_kinds_on_pro(
         "backup",
         "archive_sync",
         "history_index",
+        "stats",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_followups_omit_history_index_for_an_agent_repository(
+    db, runner, registry, monkeypatch
+):
+    """Through the real per-repository gate (only the plan is stubbed): a
+    backup of a repository executed by an agent gets no history stage, since
+    the server cannot diff it."""
+
+    async def ok(ctx):
+        return Outcome()
+
+    registry["backup"] = ok
+    registry["archive_sync"] = ok
+    registry["history_merge"] = ok
+    registry["history_index"] = ok
+    registry["stats"] = ok
+    monkeypatch.setattr(
+        "app.services.operations.followups.history_enabled", lambda db: True
+    )
+    agent = Repository(
+        name="agent",
+        path="/tmp/agent",
+        encryption="none",
+        compression="lz4",
+        executor_type="agent",
+        execution_target="agent",
+    )
+    db.add(agent)
+    db.add(SystemSettings())
+    db.commit()
+
+    enqueue(db, "backup", repository_id=agent.id, trigger="manual")
+    await _drain(runner)
+    db.expire_all()
+    rows = db.query(Operation).order_by(Operation.id).all()
+    assert [r.kind for r in rows] == [
+        "backup",
+        "archive_sync",
+        "history_merge",
         "stats",
     ]
 

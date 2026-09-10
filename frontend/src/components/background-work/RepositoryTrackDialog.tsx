@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Alert,
   Box,
@@ -22,7 +22,13 @@ import { REBUILD_STAGES } from './repositoryTrack'
 import { archivesAPI, operationsAPI } from '../../services/api'
 import { usePlan } from '../../hooks/usePlan'
 import { parseBackendDate } from '../../utils/dateUtils'
-import type { HubArchive, OperationItem, RebuildStage } from '../../types/operations'
+import type {
+  HubArchive,
+  HubHistorySummary,
+  OperationItem,
+  RebuildStage,
+} from '../../types/operations'
+import type { HistoryCapability } from '../../types/archives'
 
 interface RepositoryTrackDialogProps {
   open: boolean
@@ -30,6 +36,11 @@ interface RepositoryTrackDialogProps {
   repositoryId: number
   repositoryName: string
   operations: OperationItem[]
+  // From the hub row; the history stage is not offered when the
+  // repository cannot have one (an agent executes it), and its summary
+  // says whether an index built before that is still there.
+  historyCapability?: HistoryCapability
+  history?: HubHistorySummary
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
@@ -100,6 +111,8 @@ export default function RepositoryTrackDialog({
   repositoryId,
   repositoryName,
   operations,
+  historyCapability = 'available',
+  history,
 }: RepositoryTrackDialogProps) {
   const { t } = useTranslation()
   const theme = useTheme()
@@ -107,7 +120,21 @@ export default function RepositoryTrackDialog({
   const [submitting, setSubmitting] = useState(false)
   const [failed, setFailed] = useState(false)
   const { can } = usePlan()
-  const historyLocked = !can('archive_history')
+  const historyLockedByPlan = !can('archive_history')
+  const historyLocked = historyLockedByPlan || historyCapability !== 'available'
+  // An index built before the repository moved to an agent (or before the
+  // plan lapsed) is still real data (the hub row and the Changes tab show
+  // it); a repository with none is told why there is none instead of
+  // "every archive has its file history".
+  const historyUnavailable =
+    historyCapability !== 'available' &&
+    (history == null || (history.indexed === 0 && history.rows === 0))
+  // A picked history stage that becomes locked while the dialog is open
+  // (the row's capability changed under it) would still be sent and
+  // refused; fall back to the stage before it.
+  useEffect(() => {
+    if (historyLocked && stage === 'history') setStage('archives')
+  }, [historyLocked, stage])
 
   const { data: detail } = useQuery({
     queryKey: ['operations-repository-detail', repositoryId],
@@ -233,9 +260,21 @@ export default function RepositoryTrackDialog({
                       />
                     )}
                     <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                      {t('operations.background.hub.detailHint')}
+                      {historyCapability === 'agent_unsupported'
+                        ? // leftovers from a server-executed past: real, but
+                          // no rebuild can touch them on an agent's repository
+                          t('operations.background.hub.historyAgentUnsupported')
+                        : t('operations.background.hub.detailHint')}
                     </Typography>
                   </Stack>
+                ) : historyUnavailable ? (
+                  // "every archive has its file history" would be a claim
+                  // about an index that was never built
+                  <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                    {historyCapability === 'agent_unsupported'
+                      ? t('operations.background.hub.historyAgentUnsupported')
+                      : t('operations.background.hub.historyNone')}
+                  </Typography>
                 ) : (
                   <Typography
                     variant="body2"
@@ -259,7 +298,14 @@ export default function RepositoryTrackDialog({
             <Typography variant="body2" sx={{ color: 'text.secondary', mb: 1.5 }}>
               {t('operations.background.rebuildMenuHint')}
             </Typography>
-            <RebuildStagePicker value={stage} onChange={setStage} historyLocked={historyLocked} />
+            <RebuildStagePicker
+              value={stage}
+              onChange={setStage}
+              historyLocked={historyLocked}
+              historyLockedReason={
+                !historyLockedByPlan && historyCapability === 'agent_unsupported' ? 'agent' : 'plan'
+              }
+            />
             <Typography variant="body2" sx={{ color: 'text.secondary', mt: 1.5 }}>
               {summary}
             </Typography>

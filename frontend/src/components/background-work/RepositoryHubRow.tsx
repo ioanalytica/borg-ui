@@ -20,6 +20,7 @@ import { PLAN_COLOR, PLAN_LABEL } from '../../core/features'
 import { parseBackendDate } from '../../utils/dateUtils'
 import { HUB_GRID_COLUMNS, type RepositoryTrack, type StageState } from './repositoryTrack'
 import type { HubRepository } from '../../types/operations'
+import type { HistoryCapability } from '../../types/archives'
 
 interface RepositoryHubRowProps {
   // Null for the system lane (package installs and other work with no
@@ -27,6 +28,9 @@ interface RepositoryHubRowProps {
   repository: HubRepository | null
   track: RepositoryTrack | null
   historyAvailable: boolean
+  // The repository's own reason for having no history stage (an agent
+  // executes it), next to the plan-wide `historyAvailable`.
+  historyCapability?: HistoryCapability
   totalHistoryRows: number
   onOpen: () => void
   onRetry: (stage: StageState) => void
@@ -100,16 +104,28 @@ function Flag({
 function HistoryCell({
   repository,
   historyAvailable,
+  historyCapability,
   totalHistoryRows,
 }: {
   repository: HubRepository
   historyAvailable: boolean
+  historyCapability?: HistoryCapability
   totalHistoryRows: number
 }) {
   const { t } = useTranslation()
   const theme = useTheme()
   const { history, archives } = repository
 
+  // An index built before the repository moved to an agent is still real
+  // data (the Changes tab serves it); only a repository with none says so.
+  if (
+    historyAvailable &&
+    historyCapability === 'agent_unsupported' &&
+    history.indexed === 0 &&
+    history.rows === 0
+  ) {
+    return <Cell muted primary={t('operations.background.hub.historyAgentUnsupported')} />
+  }
   if (!historyAvailable) {
     return (
       <Cell
@@ -184,6 +200,7 @@ export default function RepositoryHubRow({
   repository,
   track,
   historyAvailable,
+  historyCapability,
   totalHistoryRows,
   onOpen,
   onRetry,
@@ -305,6 +322,7 @@ export default function RepositoryHubRow({
             <HistoryCell
               repository={repository}
               historyAvailable={historyAvailable}
+              historyCapability={historyCapability}
               totalHistoryRows={totalHistoryRows}
             />
             <Cell

@@ -449,8 +449,10 @@ Two more index kinds fill and maintain `archive_changes`:
   yet stays pending for the next run, and the run reports
   `completed_with_warnings` so a stalled series is visible. An archive that
   failed is retried on the next run: nothing else moves it out of that
-  state, and every later archive in the series waits on it. Managed-agent
-  repositories skip the stage with `agent_diff_unsupported`.
+  state, and every later archive in the series waits on it. A managed
+  agent's repository never gets the stage (see the history capability
+  below); should a row reach the executor anyway, it skips with
+  `agent_diff_unsupported`.
 - `history_merge` consumes `removed_archive_ids` from the `archive_sync`
   it depends on. A removed archive's rows are folded into its successor
   (the table in the spec, section 8.4), or the successor is reset to
@@ -461,6 +463,25 @@ Two more index kinds fill and maintain `archive_changes`:
 Only `history_index` is gated on the plan including `archive_history`; on
 Community installs the follow-up chains and the reconcile run omit it, and
 activating a Pro licence enqueues a reconcile run for every repository.
+The same gate applies per repository through its history capability
+(`history_capability` in `app/services/operations/followups.py`): a
+repository executed by a managed agent cannot be diffed by the server, so
+it is `agent_unsupported` and gets no `history_index` from any chain, the
+rebuild route refuses `from = history` for it (409) and drops the kind for
+`from = archives`. The capability is derived from the plan and the
+executor when read, not stored. `archive_sync` marks such a repository's
+`pending` and `failed` archives `skipped`, the state the history run used
+to write for them (nothing there could retry a failure), and
+`history_merge` resets a successor to `skipped` rather than `pending`
+there; moving the repository back to the server puts them back to
+`pending` with a fresh retry budget and queues an index run. The archive
+list, detail and changes
+responses, the hub rows and the path-history `coverage` carry it, so the
+UI says "not available" where the stage does not exist rather than "not
+yet"; the file history panel reads `coverage` (indexed archives out of
+all) before it calls a repository unindexed or a path absent, and the
+series' own archive states before it counts older archives without the
+path.
 `history_merge` runs on every plan, because it is what deletes the rows of
 archives that have left the repository: `archive_sync` reports them and
 deliberately leaves the deletion to it.

@@ -7,8 +7,15 @@ import RepositoryTrackDialog from './RepositoryTrackDialog'
 import api from '../../services/api'
 import { hubDetail, op } from './storyFixtures'
 import type { HubRepositoryDetail } from '../../types/operations'
+import type { HistoryCapability } from '../../types/archives'
 
-function Wrapper({ detail }: { detail: HubRepositoryDetail }) {
+function Wrapper({
+  detail,
+  historyCapability,
+}: {
+  detail: HubRepositoryDetail
+  historyCapability?: HistoryCapability
+}) {
   const [open, setOpen] = useState(true)
   const [ready, setReady] = useState(false)
   useEffect(() => {
@@ -29,6 +36,7 @@ function Wrapper({ detail }: { detail: HubRepositoryDetail }) {
         onClose={() => setOpen(false)}
         repositoryId={4}
         repositoryName="laptop"
+        historyCapability={historyCapability}
         operations={[
           op({ kind: 'stats', status: 'completed' }),
           op({ id: 2, kind: 'archive_sync', status: 'running' }),
@@ -53,5 +61,16 @@ export const WithProblems: Story = {
 export const AllIndexed: Story = {
   render: () => (
     <Wrapper detail={{ repository_id: 4, failed_archives: [], truncated_archives: [] }} />
+  ),
+}
+
+// An agent's repository: the history stage is locked by the executor, with
+// its own wording rather than a plan chip.
+export const AgentRepository: Story = {
+  render: () => (
+    <Wrapper
+      detail={{ ...hubDetail, failed_archives: [], truncated_archives: [] }}
+      historyCapability="agent_unsupported"
+    />
   ),
 }

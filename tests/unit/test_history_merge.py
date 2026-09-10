@@ -167,6 +167,27 @@ async def test_unindexed_removed_archive_resets_indexed_successor(db, repo):
 
 
 @pytest.mark.unit
+async def test_reset_successor_of_an_agent_repository_is_skipped_not_pending(db, repo):
+    """No history run comes for an agent's repository, so a successor that
+    loses its base takes the state the listing writes there; `pending`
+    would read as "not yet" for good. The capability is derived from the
+    plan and the row's executor, not stubbed."""
+    repo.executor_type = "agent"
+    repo.execution_target = "agent"
+    db.commit()
+    r = _archive(db, repo, "r", 2, state="skipped")
+    s = _archive(db, repo, "s", 3)
+    _row(db, s, "a", "added", after=1)
+    op = _ops(db, repo, [r.id])
+    with patch("app.services.operations.followups.history_enabled", return_value=True):
+        out = await history.run_history_merge(_ctx(db, repo, op))
+    assert out.result["reset"] == 1
+    db.refresh(s)
+    assert s.history_state == "skipped" and s.history_rows is None
+    assert db.query(ArchiveChange).filter_by(archive_id=s.id).count() == 0
+
+
+@pytest.mark.unit
 async def test_pending_successor_or_no_successor_just_drops(db, repo):
     r1 = _archive(db, repo, "r1", 1)
     _row(db, r1, "a", "added", after=1)

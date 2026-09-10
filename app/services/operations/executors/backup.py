@@ -97,10 +97,12 @@ async def _cancel_agent_backup(operation_id: int) -> bool:
 def _enqueue_post_create_chain(ctx, operation: Operation) -> None:
     from app.services.operations.enqueue import enqueue_chain
     from app.services.operations.executors import registered_kinds
-    from app.services.operations.followups import chain_for, history_enabled
+    from app.services.operations.followups import chain_for, history_possible_for
 
     kinds = chain_for(
-        "backup", available=registered_kinds(), history=history_enabled(ctx.db)
+        "backup",
+        available=registered_kinds(),
+        history=history_possible_for(ctx.db, operation.repository_id),
     )
     if not kinds:
         return

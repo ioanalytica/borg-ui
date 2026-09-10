@@ -1096,7 +1096,8 @@
       "showMore": "Mostrar más",
       "filterLabel": "Tipo de cambio",
       "delta": "{{sign}}{{size}}",
-      "summaryFolder": "Carpeta"
+      "summaryFolder": "Carpeta",
+      "agentUnsupported": "El historial de cambios no está disponible para repositorios ejecutados por un agente."
     },
     "files": {
       "size": "Tamaño",
@@ -1125,7 +1126,12 @@
       "historyEmpty": "Ningún archivo anterior contiene esta ruta.",
       "type": "Tipo",
       "typeFile": "Fichero",
-      "typeDirectory": "Carpeta"
+      "typeDirectory": "Carpeta",
+      "historyUnavailableAgent": "El historial de cambios no está disponible para repositorios ejecutados por un agente.",
+      "historyNotIndexed": "Este repositorio aún no se ha indexado.",
+      "historyCoverage": "{{indexed}} de {{total}} archivos indexados",
+      "historyEmptyIndexed": "Ninguno de los archivos indexados contiene esta ruta.",
+      "historyFailed": "Este repositorio no se pudo indexar."
     },
     "toolbarOperations": "Operaciones",
     "hourly": {
@@ -3661,7 +3667,8 @@
         "detailAttempts_other": "{{count}} intentos",
         "detailAllIndexed": "Todos los archivos tienen su historial de ficheros.",
         "detailHint": "Reconstruye desde Historial de ficheros para indexar estos archivos de nuevo.",
-        "viewIndexRuns": "Ver ejecuciones de índice"
+        "viewIndexRuns": "Ver ejecuciones de índice",
+        "historyAgentUnsupported": "No disponible para repositorios de agente"
       },
       "rebuildMenuHint": "Cada etapa posterior a la elegida también se reconstruye. Las anteriores se conservan. Las estadísticas siempre van al final, porque suman lo que produjeron las demás etapas.",
       "rebuildTitle": "Reconstruir datos derivados",
@@ -3669,7 +3676,8 @@
       "stageWillRebuild": "Se reconstruirá",
       "stageKept": "Se conserva",
       "stageStart": "Empezar aquí",
-      "currentRun": "Ejecución actual"
+      "currentRun": "Ejecución actual",
+      "stageAgentUnsupported": "No disponible para repositorios ejecutados por un agente"
     },
     "status": {
       "queued": "En cola",
@@ -5901,7 +5909,8 @@
         "failedListArchives": "Error al listar los archivos",
         "repositoryNotFound": "Repositorio no encontrado",
         "fileNotFoundAfterExtraction": "Archivo no encontrado después de la extracción",
-        "failedExtractFile": "Error al extraer el archivo: {{error}}"
+        "failedExtractFile": "Error al extraer el archivo: {{error}}",
+        "historyUnavailableForAgent": "El historial de cambios no está disponible para repositorios ejecutados por un agente, así que no hay nada que reconstruir."
       },
       "borg": {
         "repositoryDoesNotExist": "El repositorio no existe en la ruta especificada",

@@ -221,6 +221,17 @@ export default function PipelineBoard({ canManage }: PipelineBoardProps) {
     onSettled: invalidateBoard,
   })
 
+  // The listing chain (archive_sync, history_merge, stats) without
+  // invalidating anything: what a retry of the history segment needs on a
+  // repository that has no history stage, where its segment is the merge
+  // alone and a rebuild from the history stage is refused.
+  const resyncMutation = useMutation({
+    mutationFn: (repositoryId: number) => archivesAPI.resync(repositoryId),
+    onMutate: () => setRebuildFailed(false),
+    onError: () => setRebuildFailed(true),
+    onSettled: invalidateBoard,
+  })
+
   const limitsMutation = useMutation({
     mutationFn: (workers: number) => operationsAPI.updateLimits(workers),
     onSettled: () => queryClient.invalidateQueries({ queryKey: QUEUE_KEY }),
@@ -233,13 +244,26 @@ export default function PipelineBoard({ canManage }: PipelineBoardProps) {
     onSettled: invalidateBoard,
   })
 
+  const hubRepositories = hub.data?.repositories
   const handleRetry = useCallback(
     (repositoryId: number | null, stage: StageState) => {
       const rebuildStage = REBUILD_STAGE_FOR[stage.key]
       if (!rebuildStage || repositoryId == null) return
+      // A repository without the history stage (the plan lacks it, or an
+      // agent executes it) has its history segment from `history_merge`
+      // alone, and a rebuild from the history stage is refused for it. The
+      // retry re-runs the listing chain instead, which includes the merge
+      // and invalidates nothing.
+      const capability =
+        hubRepositories?.find((repo) => repo.repository_id === repositoryId)?.history_capability ??
+        'available'
+      if (rebuildStage === 'history' && capability !== 'available') {
+        resyncMutation.mutate(repositoryId)
+        return
+      }
       rebuildMutation.mutate({ repositoryId, stage: rebuildStage })
     },
-    [rebuildMutation]
+    [rebuildMutation, resyncMutation, hubRepositories]
   )
 
   if (queue.isError) {
@@ -386,6 +410,7 @@ export default function PipelineBoard({ canManage }: PipelineBoardProps) {
               repository={row.repository}
               track={row.track}
               historyAvailable={historyAvailable}
+              historyCapability={row.repository?.history_capability}
               totalHistoryRows={hub.data.totals.history_rows}
               onOpen={() => {
                 const id = row.repository?.repository_id ?? row.track?.repositoryId ?? null
@@ -418,6 +443,13 @@ export default function PipelineBoard({ canManage }: PipelineBoardProps) {
           onClose={() => setTrackRepository(null)}
           repositoryId={trackRepository.id}
           repositoryName={trackRepository.name}
+          historyCapability={
+            hub.data.repositories.find((repo) => repo.repository_id === trackRepository.id)
+              ?.history_capability
+          }
+          history={
+            hub.data.repositories.find((repo) => repo.repository_id === trackRepository.id)?.history
+          }
           operations={
             queue.data.repositories.find((repo) => repo.repository_id === trackRepository.id)
               ?.operations ?? []

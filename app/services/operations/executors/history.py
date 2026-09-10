@@ -29,7 +29,11 @@ from app.database.models import (
 )
 from app.services.operations import executors
 from app.services.operations.executors.index import _load_repository
-from app.services.operations.followups import history_enabled
+from app.services.operations.followups import (
+    HISTORY_AGENT_UNSUPPORTED,
+    history_capability,
+    history_enabled,
+)
 from app.services.operations.history_fold import (
     change_to_row_dict,
     fold_pair,
@@ -359,6 +363,8 @@ async def run_history_index(ctx) -> Outcome:
     ]
     pending = [a for a in candidates if a not in exhausted]
     if is_agent_executor(repository):
+        # The chains no longer create this stage for an agent's repository;
+        # a row that reaches it anyway marks what the listing marks.
         for archive in pending:
             archive.history_state = "skipped"
         db.commit()
@@ -472,14 +478,17 @@ def _delete_rows(db: Session, archive_id: int) -> None:
     )
 
 
-def merge_removed_archive(db: Session, removed: Archive) -> str:
+def merge_removed_archive(
+    db: Session, removed: Archive, *, reset_state: str = "pending"
+) -> str:
     """Fold `removed` into its successor and delete it, in one transaction.
 
     Returns "folded" when both archives were indexed, "reset" when the
     successor was indexed against an archive that never was (its delta is
-    now against the wrong base, so it goes back to pending), and "dropped"
-    when there is no successor or the successor is not indexed yet (it will
-    be diffed against the new predecessor when it is).
+    now against the wrong base, so it goes back to `reset_state`: pending,
+    or skipped where no history run will come, an agent's repository), and
+    "dropped" when there is no successor or the successor is not indexed
+    yet (it will be diffed against the new predecessor when it is).
     """
     successor = successor_of(db, removed)
     try:
@@ -515,7 +524,7 @@ def merge_removed_archive(db: Session, removed: Archive) -> str:
             outcome = "folded"
         elif successor.history_state == "indexed":
             _delete_rows(db, successor.id)
-            successor.history_state = "pending"
+            successor.history_state = reset_state
             successor.history_indexed_at = None
             successor.history_rows = None
             successor.history_truncated = False
@@ -540,6 +549,17 @@ async def run_history_merge(ctx) -> Outcome:
     db = ctx.db
     counts = {"merged": 0, "folded": 0, "reset": 0, "dropped": 0}
     ids = removed_archive_ids_from_dependency(db, ctx.operation)
+    # A reset successor reads as "not yet"; on an agent's repository no run
+    # comes, so it takes the state the listing writes there. The plan lookup
+    # behind the capability commits, so it is read only with work to do and
+    # only for an agent's repository.
+    reset_state = (
+        "skipped"
+        if ids
+        and is_agent_executor(repository)
+        and history_capability(db, repository) == HISTORY_AGENT_UNSUPPORTED
+        else "pending"
+    )
     for position, archive_id in enumerate(ids):
         if ctx.cancelled():
             break
@@ -548,7 +568,7 @@ async def run_history_merge(ctx) -> Outcome:
             continue
         # The row is gone (and expired) after the merge commits.
         name = removed.name
-        outcome = merge_removed_archive(db, removed)
+        outcome = merge_removed_archive(db, removed, reset_state=reset_state)
         counts[outcome] += 1
         counts["merged"] += 1
         ctx.log(f"{name}: {outcome}")

@@ -97,6 +97,65 @@ describe('RepositoryTrackDialog', () => {
     })
   })
 
+  it('says history is not available for an agent repository with no index and locks the stage with that reason', async () => {
+    renderDialog({
+      historyCapability: 'agent_unsupported',
+      history: { indexed: 0, pending: 0, failed: 0, skipped: 18, truncated: 0, rows: 0 },
+    })
+    // the detail section, once loaded, and the stage picker each say so
+    expect(await screen.findByText(/not available for agent repositories/i)).toBeInTheDocument()
+    expect(screen.getByText(/repositories executed by an agent/i)).toBeInTheDocument()
+    expect(screen.queryByText(/every archive has its file history/i)).not.toBeInTheDocument()
+    expect(screen.getByTestId('rebuild-stage-history')).toHaveAttribute('data-state', 'locked')
+  })
+
+  it('keeps showing an index an agent repository built before it moved', async () => {
+    renderDialog({
+      historyCapability: 'agent_unsupported',
+      history: { indexed: 12, pending: 0, failed: 0, skipped: 0, truncated: 0, rows: 4000 },
+    })
+    expect(await screen.findByText(/every archive has its file history/i)).toBeInTheDocument()
+    expect(screen.getByTestId('rebuild-stage-history')).toHaveAttribute('data-state', 'locked')
+  })
+
+  it('makes no claim about an index a plan-locked repository never built', async () => {
+    mockCan.mockReturnValue(false)
+    renderDialog({
+      historyCapability: 'plan_locked',
+      history: { indexed: 0, pending: 18, failed: 0, skipped: 0, truncated: 0, rows: 0 },
+    })
+    expect(await screen.findByText(/no file history yet/i)).toBeInTheDocument()
+    expect(screen.queryByText(/every archive has its file history/i)).not.toBeInTheDocument()
+  })
+
+  it('drops a picked history stage when the repository loses the stage while open', async () => {
+    const { rerender } = renderDialog({ historyCapability: 'available' })
+    fireEvent.click(await screen.findByTestId('rebuild-stage-history'))
+    expect(screen.getByTestId('rebuild-stage-history')).toHaveAttribute('aria-checked', 'true')
+
+    rerender(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <MemoryRouter>
+          <RepositoryTrackDialog
+            open
+            onClose={vi.fn()}
+            repositoryId={3}
+            repositoryName="nas"
+            operations={[op({})]}
+            historyCapability="agent_unsupported"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('rebuild-stage-archives')).toHaveAttribute('aria-checked', 'true')
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^rebuild$/i }))
+    await waitFor(() => expect(archivesAPI.rebuild).toHaveBeenCalledWith(3, 'archives'))
+  })
+
   it('renders one row per operation with its stage timing', () => {
     renderDialog({ operations: [op({ kind: 'stats' }), op({ id: 2, kind: 'archive_sync' })] })
     expect(screen.getByText('nas')).toBeInTheDocument()

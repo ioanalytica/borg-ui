@@ -6,7 +6,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import Session
 
 from app.api.maintenance_jobs import get_repository_with_access
@@ -29,7 +29,14 @@ from app.services.operations.executors.history import (
     predecessor_of,
     successor_of,
 )
-from app.services.operations.followups import PLAN_GATED_KINDS, history_enabled
+from app.services.operations.executors.history import MAX_HISTORY_ATTEMPTS
+from app.services.operations.followups import (
+    HISTORY_AGENT_UNSUPPORTED,
+    HISTORY_AVAILABLE,
+    PLAN_GATED_KINDS,
+    history_capability,
+    history_enabled,
+)
 from app.services.operations.history_fold import Change, fold_sequence, rows_to_changes
 from app.services.operations.reconcile import enqueue_reconcile_run
 from app.services.operations.repository_status import repository_status
@@ -152,6 +159,10 @@ async def list_archives(
     db: Session = Depends(get_db),
 ):
     repository = _repo(db, current_user, repo_id)
+    # The plan lookup commits the session; read it before the rows so the
+    # commit cannot expire them (one refresh per archive otherwise; the
+    # repository row alone is refreshed once).
+    history = history_enabled(db)
     rows = (
         _archives_query(db, repository, series, _naive_utc(since), _naive_utc(until))
         .order_by(Archive.start.desc(), Archive.id.desc())
@@ -170,7 +181,11 @@ async def list_archives(
         "series": all_series,
         "sync_state": state,
         "last_synced_at": last_at,
-        "history_available": history_enabled(db),
+        # `history_available` keeps its meaning (the plan has the feature);
+        # the capability says whether this repository has the stage, and
+        # why not.
+        "history_available": history,
+        "history_capability": history_capability(db, repository, history=history),
     }
 
 
@@ -263,6 +278,7 @@ async def get_archive(
     db: Session = Depends(get_db),
 ):
     repository = _repo(db, current_user, repo_id)
+    history = history_enabled(db)  # commits; before the archive rows load
     archive = _archive_or_404(db, repository, archive_id)
     predecessor = predecessor_of(db, archive)
     successor = successor_of(db, archive)
@@ -270,7 +286,8 @@ async def get_archive(
         **serialize_archive(archive),
         "predecessor_id": predecessor.id if predecessor else None,
         "successor_id": successor.id if successor else None,
-        "history_available": history_enabled(db),
+        "history_available": history,
+        "history_capability": history_capability(db, repository, history=history),
     }
 
 
@@ -312,6 +329,14 @@ async def rebuild(
     history = history_enabled(db)
     if body.from_stage == "history":
         require_feature_access(db, "archive_history")
+    capability = history_capability(db, repository, history=history)
+    if body.from_stage == "history" and capability == HISTORY_AGENT_UNSUPPORTED:
+        # A rebuild that can only skip again would reset every archive to
+        # `pending` for nothing and read as "not yet" in the UI.
+        raise HTTPException(
+            status_code=409,
+            detail={"key": "backend.errors.archives.historyUnavailableForAgent"},
+        )
     archives = db.query(Archive).filter(Archive.repository_id == repository.id).all()
     if body.from_stage == "archives":
         for a in archives:
@@ -325,13 +350,14 @@ async def rebuild(
             )
         for a in archives:
             a.history_state = "pending"
+            a.history_attempts = 0
             a.history_indexed_at = None
             a.history_rows = None
             a.history_truncated = False
         kinds = ["history_index", "stats"]
     else:
         kinds = ["stats"]
-    if not history:
+    if capability != HISTORY_AVAILABLE:
         kinds = [k for k in kinds if k not in PLAN_GATED_KINDS]
     db.commit()
     ops = enqueue_chain(
@@ -405,12 +431,14 @@ async def archive_changes(
     archive of the same series with the intermediate deltas folded (spec
     9.2). `cursor` is an offset into the filtered, path-ordered result."""
     repository = _repo(db, current_user, repo_id)
+    history = history_enabled(db)  # commits; before the archive rows load
     target = _archive_or_404(db, repository, archive_id)
     predecessor = predecessor_of(db, target)
     base = {
         "archive_id": target.id,
         "history_state": target.history_state,
         "history_truncated": target.history_truncated,
+        "history_capability": history_capability(db, repository, history=history),
     }
     if compare_to is None:
         compare = predecessor
@@ -522,6 +550,7 @@ async def path_history(
     db: Session = Depends(get_db),
 ):
     repository = _repo(db, current_user, repo_id)
+    history = history_enabled(db)  # commits; before the archive rows load
     rows = (
         db.query(ArchiveChange, Archive)
         .join(Archive, Archive.id == ArchiveChange.archive_id)
@@ -556,11 +585,46 @@ async def path_history(
             r["series"] == newest.series and r["to_archive_id"] is None for r in ranges
         )
     )
+    # What the answer is based on: with nothing indexed the entries say
+    # nothing about the path, and with a partial index they cover only the
+    # indexed archives.
+    # `total` counts the archives an index run can still reach: a `skipped`
+    # archive (an agent's repository) never will, so it is no missing
+    # progress; `exhausted` are the failures the executor gave up on.
+    total, indexed, exhausted = (
+        db.query(
+            func.count(Archive.id),
+            func.sum(case((Archive.history_state == "indexed", 1), else_=0)),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Archive.history_state == "failed",
+                            Archive.history_attempts >= MAX_HISTORY_ATTEMPTS,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+        )
+        .filter(
+            Archive.repository_id == repository.id,
+            Archive.history_state != "skipped",
+        )
+        .one()
+    )
     return {
         "path": path,
         "entries": list(reversed(ascending)),
         "present": ranges,
         "present_in_latest": present_in_latest,
+        "coverage": {
+            "indexed": int(indexed or 0),
+            "exhausted": int(exhausted or 0),
+            "total": int(total or 0),
+            "capability": history_capability(db, repository, history=history),
+        },
     }
 
 

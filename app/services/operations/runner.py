@@ -19,7 +19,7 @@ from app.services.operations.events import (
     broadcast_operation_progress,
     broadcast_operation_updated,
 )
-from app.services.operations.followups import chain_for, history_enabled
+from app.services.operations.followups import chain_for, history_possible_for
 from app.services.operations.lanes import can_start
 from app.services.operations.vocab import INDEX_KINDS, SUCCESS_STATUSES, is_exclusive
 from app.utils.process_utils import is_process_alive
@@ -475,7 +475,7 @@ class OperationRunner:
                 kinds = chain_for(
                     op.kind,
                     available=self._registered_kinds(),
-                    history=history_enabled(db),
+                    history=history_possible_for(db, op.repository_id),
                 )
                 if kinds:
                     enqueue_chain(

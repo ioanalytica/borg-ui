@@ -12,7 +12,11 @@ from app.database.database import SessionLocal
 from app.database.models import Operation, Repository, SystemSettings, utc_now
 from app.services.operations.enqueue import enqueue_chain
 from app.services.operations.executors import registered_kinds
-from app.services.operations.followups import PLAN_GATED_KINDS, history_enabled
+from app.services.operations.followups import (
+    PLAN_GATED_KINDS,
+    history_enabled,
+    history_possible_for,
+)
 from app.services.operations.vocab import PRIORITY_RECONCILE
 
 logger = structlog.get_logger()
@@ -68,7 +72,11 @@ def enqueue_reconcile_run(
     empty list when index work for the repository is already in flight, so a
     burst of callers (a run of archive deletes, say) queues one run rather
     than one per call."""
-    kinds = reconcile_kinds(db, history=history)
+    # The plan gate is read once by the caller; the executor gate is per
+    # repository (an agent's repository gets no history stage).
+    kinds = reconcile_kinds(
+        db, history=history_possible_for(db, repository_id, history=history)
+    )
     if not kinds or has_active_index_work(db, repository_id):
         return []
     return enqueue_chain(
