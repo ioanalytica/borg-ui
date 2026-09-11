@@ -4,6 +4,7 @@ Series inference follows spec 6.6 through `app.services.operations.series`.
 
 import json
 import re
+from datetime import timedelta
 from typing import Iterable, Optional, Sequence
 
 import structlog
@@ -134,7 +135,13 @@ def apply_listing(
                 if key == "series" and value != row.series:
                     row.history_state = "pending"
                 setattr(row, key, value)
-        row.last_seen_at = now
+        # This also identifies the observation used by a delayed merge.
+        # Always advance it, including when the wall clock moves backward.
+        row.last_seen_at = (
+            max(now, row.last_seen_at + timedelta(microseconds=1))
+            if row.last_seen_at is not None
+            else now
+        )
     removed = [a.id for borg_id, a in existing.items() if borg_id not in seen]
     db.commit()
     for row in new_rows:
@@ -592,6 +599,21 @@ async def run_archive_sync(ctx) -> Outcome:
         new_rows, removed_ids = apply_listing(
             db, repository, entries, timezone_name=timezone_name
         )
+        # Capture identities while this sync still owns the metadata lane.
+        # A delayed merge must not delete a new archive that reuses an ID
+        # after another chain has already removed the original archive.
+        removed_id_set = set(removed_ids)
+        removed_rows = [
+            row
+            for row in db.query(Archive.id, Archive.borg_id, Archive.last_seen_at)
+            .filter(Archive.repository_id == repository.id)
+            .all()
+            if row.id in removed_id_set
+        ]
+        removed_borg_ids = {str(row.id): row.borg_id for row in removed_rows}
+        removed_last_seen_at = {
+            str(row.id): row.last_seen_at.isoformat() for row in removed_rows
+        }
         if is_agent_executor(repository):
             # No history run ever reaches an agent's repository (the server
             # cannot diff it), so the listing records the state the history
@@ -659,6 +681,8 @@ async def run_archive_sync(ctx) -> Outcome:
                 "new": len(new_rows),
                 "info_filled": filled,
                 "removed_archive_ids": removed_ids,
+                "removed_archive_borg_ids": removed_borg_ids,
+                "removed_archive_last_seen_at": removed_last_seen_at,
             }
         )
     finally:
