@@ -97,6 +97,12 @@ export const hubRepositories: HubRepository[] = [
     archives: 15,
     history: { indexed: 15, pending: 0, failed: 0, skipped: 0, truncated: 0, rows: 62 },
   }),
+  hubRepository({
+    repository_id: 6,
+    repository_name: 'media',
+    archives: 22,
+    history: { indexed: 22, pending: 0, failed: 0, skipped: 0, truncated: 0, rows: 3140 },
+  }),
 ]
 
 export const hubResponse: HubResponse = {
@@ -147,6 +153,7 @@ export const busyQueue: QueueResponse = {
       repository_id: 1,
       repository_name: 'offsite',
       lane_busy: false,
+      index_busy: false,
       operations: [
         op({ id: 1, kind: 'import_connect', category: 'import', repository: 'offsite' }),
       ],
@@ -155,6 +162,7 @@ export const busyQueue: QueueResponse = {
       repository_id: 2,
       repository_name: 'nas',
       lane_busy: true,
+      index_busy: false,
       operations: [
         op({
           id: 2,
@@ -180,6 +188,7 @@ export const busyQueue: QueueResponse = {
       repository_id: 3,
       repository_name: 'photos',
       lane_busy: false,
+      index_busy: false,
       operations: [
         op({
           id: 4,
@@ -198,6 +207,7 @@ export const busyQueue: QueueResponse = {
       repository_id: 4,
       repository_name: 'laptop',
       lane_busy: false,
+      index_busy: false,
       operations: [
         op({ id: 5, status: 'completed', repository: 'laptop', repository_id: 4 }),
         op({
@@ -207,6 +217,34 @@ export const busyQueue: QueueResponse = {
           repository: 'laptop',
           repository_id: 4,
           error_message: 'borg list timed out',
+        }),
+      ],
+    },
+    {
+      // a stats of the repository still running: the next listing waits
+      // for it (one index operation per repository), with a worker to
+      // spare. The listing is another chain's, or the flag would not apply.
+      repository_id: 6,
+      repository_name: 'media',
+      lane_busy: false,
+      index_busy: true,
+      operations: [
+        op({
+          id: 7,
+          kind: 'stats',
+          status: 'running',
+          repository: 'media',
+          repository_id: 6,
+          started_at: minutesAgo(1),
+        }),
+        op({
+          id: 8,
+          kind: 'archive_sync',
+          status: 'queued',
+          repository: 'media',
+          repository_id: 6,
+          run_id: 'r2',
+          trigger: 'followup',
         }),
       ],
     },

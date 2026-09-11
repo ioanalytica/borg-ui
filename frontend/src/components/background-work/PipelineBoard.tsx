@@ -22,6 +22,7 @@ import {
   REBUILD_STAGES,
   REBUILD_STAGE_FOR,
   type StageState,
+  indexBusyFrom,
 } from './repositoryTrack'
 import { archivesAPI, operationsAPI } from '../../services/api'
 import { useOperationEvents } from '../../hooks/useOperationEvents'
@@ -140,14 +141,20 @@ export default function PipelineBoard({ canManage }: PipelineBoardProps) {
             repo.repository_id === updated.repository_id ||
             repo.operations.some((op) => op.id === updated.id)
         )
-        const repositories = current.repositories.map((repo) => ({
-          ...repo,
-          operations: repo.operations.some((op) => op.id === updated.id)
+        const repositories = current.repositories.map((repo) => {
+          const mine =
+            repo.operations.some((op) => op.id === updated.id) ||
+            repo.repository_id === updated.repository_id
+          if (!mine) return repo
+          const operations = repo.operations.some((op) => op.id === updated.id)
             ? repo.operations.map((op) => (op.id === updated.id ? updated : op))
-            : repo.repository_id === updated.repository_id
-              ? [...repo.operations, updated]
-              : repo.operations,
-        }))
+            : [...repo.operations, updated]
+          // the flag follows the operations of the repository the event
+          // belongs to; every other repository keeps the fetched value. The
+          // lane's holder is not in the payload, so lane_busy keeps its
+          // fetched value either way.
+          return { ...repo, operations, index_busy: indexBusyFrom(operations) }
+        })
         // The first operation for a repository the cache has never seen would
         // otherwise stay invisible until the next refetch.
         return {
@@ -160,6 +167,8 @@ export default function PipelineBoard({ canManage }: PipelineBoardProps) {
                   repository_id: updated.repository_id,
                   repository_name: updated.repository ?? 'System',
                   lane_busy: false,
+                  // from the one operation known; the next fetch decides
+                  index_busy: indexBusyFrom([updated]),
                   operations: [updated],
                 },
               ],
