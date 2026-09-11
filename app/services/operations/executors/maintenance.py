@@ -9,6 +9,7 @@ into an `Outcome` for the runner.
 """
 
 import asyncio
+from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
 import structlog
@@ -18,6 +19,7 @@ from app.database.models import Operation, Repository, utc_now
 from app.services.operations import executors
 from app.services.operations.job_facade import MaintenanceJobFacade
 from app.services.operations.runner import Outcome
+from app.utils.db_retries import commit_with_retry
 
 logger = structlog.get_logger()
 
@@ -66,6 +68,135 @@ async def cancel_watcher(
         await asyncio.sleep(_CANCEL_POLL_SECONDS)
 
 
+# The kinds whose Borg 2 server services claim the row through
+# `claim_running` before they run.
+_CLAIMING_KINDS = ("check", "prune", "compact", "delete_archive")
+
+
+def _borg2_server_service(repository: Repository) -> bool:
+    """Whether `BorgRouter` sends this repository's maintenance to a Borg 2
+    server service (the v2 services), as opposed to a Borg 1 service or a
+    managed agent."""
+    from app.services.repository_executor import is_agent_executor
+
+    return (repository.borg_version or 1) == 2 and not is_agent_executor(repository)
+
+
+def _hands_over(ctx, repository: Repository) -> bool:
+    """Whether this dispatch goes to a Borg 2 server service, the one route
+    that claims the row through `claim_running`. The Borg 1 services write
+    their own start over the runner's, the agent path leaves the row to the
+    agent's report (which stamps the start from the job and would otherwise
+    end a run with no start at all), and `restore_check` never claims."""
+    return ctx.kind in _CLAIMING_KINDS and _borg2_server_service(repository)
+
+
+async def _hand_over_to_service(ctx, claimed_at: Optional[datetime]) -> None:
+    """Give the row the service the shape it claims. The runner's claim wrote
+    `running` with a `started_at`; the Borg 2 server services claim the row
+    again through `claim_running`, which takes a `running` row only without
+    a start (the manual-start shape, so two dispatches of one id cannot both
+    start), and skip the run otherwise. The runner is the one dispatcher
+    here, so the start is the service's to record: it stamps its own when
+    it claims. One guarded UPDATE, read from the table rather than this
+    session's copy: only a row still `running` and still carrying the
+    start this dispatch's claim wrote is cleared, so a cancel that landed
+    in between keeps its start and a row another claim has since stamped
+    is left alone. A row this dispatch did not claim with a start (the
+    inline shape) is not touched either: a start it carries is not this
+    dispatch's to clear. Committed with the retry every write on this path
+    uses; the service runs in its own session."""
+    if claimed_at is None:
+        return
+
+    cleared = 0
+
+    def clear_start():
+        nonlocal cleared
+        cleared = (
+            ctx.db.query(Operation)
+            .filter(
+                Operation.id == ctx.operation_id,
+                Operation.status == "running",
+                Operation.started_at == claimed_at,
+            )
+            .update({Operation.started_at: None}, synchronize_session=False)
+        )
+
+    await commit_with_retry(
+        ctx.db,
+        prepare=clear_start,
+        logger=logger,
+        action="maintenance_hand_over",
+        operation_id=ctx.operation_id,
+    )
+    if not cleared:
+        # A cancel landed since the claim, or the row is not this claim's:
+        # the service will decline it and the executor reports that.
+        logger.info(
+            "Maintenance row not handed over, left as found",
+            operation_id=ctx.operation_id,
+            kind=ctx.kind,
+        )
+
+
+async def _restore_start(ctx, claimed_at: Optional[datetime]) -> None:
+    """A service that never claimed the row (it ended the run before that
+    on a missing repository or a lock it gave up on, returned without a
+    verdict, or raised out of the call) left it with no start; the runner's
+    start is put back, whatever the status, so the run keeps its place in
+    the history and its duration. A start the service wrote stays."""
+    if claimed_at is None:
+        return
+
+    restored = 0
+
+    def restore():
+        nonlocal restored
+        restored = (
+            ctx.db.query(Operation)
+            .filter(
+                Operation.id == ctx.operation_id,
+                Operation.started_at.is_(None),
+            )
+            .update({Operation.started_at: claimed_at}, synchronize_session=False)
+        )
+
+    try:
+        await commit_with_retry(
+            ctx.db,
+            prepare=restore,
+            logger=logger,
+            action="maintenance_restore_start",
+            operation_id=ctx.operation_id,
+        )
+    except asyncio.CancelledError:
+        # A shutdown drain cancelled this task while the retry slept: the
+        # cancel must propagate, and the start stays lost, on record.
+        ctx.db.rollback()
+        logger.warning(
+            "Maintenance start not restored, task cancelled",
+            operation_id=ctx.operation_id,
+        )
+        raise
+    except Exception as exc:
+        # Runs in the executor's `finally`: the service's own failure, if
+        # any, must reach the runner, not this one.
+        ctx.db.rollback()
+        logger.warning(
+            "Maintenance start not restored",
+            operation_id=ctx.operation_id,
+            error=str(exc),
+        )
+        return
+    if restored:
+        logger.info(
+            "Maintenance start restored, the service never claimed the row",
+            operation_id=ctx.operation_id,
+            kind=ctx.kind,
+        )
+
+
 async def _run(
     ctx,
     call: Callable[[BorgRouter, int], Awaitable[None]],
@@ -76,11 +207,19 @@ async def _run(
     if repository is None:
         return Outcome(status="skipped", skip_reason="repository_missing")
 
+    handed_over = _hands_over(ctx, repository)
+    claimed_at = ctx.operation.started_at
+    if handed_over:
+        await _hand_over_to_service(ctx, claimed_at)
     watcher = asyncio.create_task(cancel_watcher(ctx, canceller))
     try:
         await call(BorgRouter(repository), ctx.operation_id)
     finally:
         watcher.cancel()
+        if handed_over:
+            # Also on a raise or a cancel out of the call: the runner then
+            # writes the verdict, and the row must not lose its start.
+            await _restore_start(ctx, claimed_at)
 
     # The service ran in its own session and committed there. Expire this
     # one so the verdict it wrote is read back rather than assumed.
