@@ -807,3 +807,143 @@ class TestRestoreServiceCancellation:
         service.running_processes[5] = process
 
         assert await service.cancel_restore(5) is False
+
+
+def _agent_job_row(db_session, status):
+    from datetime import datetime
+
+    from app.core.security import get_password_hash
+    from app.database.models import AgentJob, AgentMachine
+
+    agent = AgentMachine(
+        name=f"restore-agent-{status}",
+        agent_id=f"agt_restore_{status}",
+        token_hash=get_password_hash("secret"),
+        token_prefix="secret",
+        status="online",
+        capabilities=[],
+    )
+    db_session.add(agent)
+    db_session.commit()
+    job = AgentJob(
+        agent_machine_id=agent.id,
+        job_type="repository",
+        status=status,
+        payload={"job_kind": "repository.restore"},
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db_session.add(job)
+    db_session.commit()
+    return job
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_cancel_agent_restore_takes_a_queued_job_off_the_queue(
+    testing_session_local, db_session
+):
+    """No agent picks up a `cancel_requested` job, so one nobody took is
+    cancelled outright instead of waiting for the stall timeout."""
+    from app.database.models import AgentJob
+
+    job = _agent_job_row(db_session, "queued")
+    service = RestoreService()
+    service.agent_restore_jobs[7] = job.id
+    dispatch = AsyncMock(return_value=True)
+
+    with (
+        patch("app.services.restore_service.SessionLocal", testing_session_local),
+        patch(
+            "app.services.agent_job_dispatcher.dispatch_agent_cancel_if_connected",
+            dispatch,
+        ),
+    ):
+        assert await service.cancel_restore(7) is True
+
+    db_session.expire_all()
+    assert db_session.get(AgentJob, job.id).status == "canceled"
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_cancel_agent_restore_asks_the_agent_that_took_the_job(
+    testing_session_local, db_session
+):
+    from app.database.models import AgentJob
+
+    job = _agent_job_row(db_session, "running")
+    service = RestoreService()
+    service.agent_restore_jobs[8] = job.id
+    dispatch = AsyncMock(return_value=True)
+
+    with (
+        patch("app.services.restore_service.SessionLocal", testing_session_local),
+        patch(
+            "app.services.agent_job_dispatcher.dispatch_agent_cancel_if_connected",
+            dispatch,
+        ),
+    ):
+        assert await service.cancel_restore(8) is True
+
+    db_session.expire_all()
+    assert db_session.get(AgentJob, job.id).status == "cancel_requested"
+    dispatch.assert_awaited_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_cancel_retry_does_not_count_as_agent_activity(
+    testing_session_local, db_session
+):
+    """The watcher asks again while the command does not reach the agent;
+    a write each time would hold off the stall timer and the reaper."""
+    from datetime import datetime
+
+    from app.database.models import AgentJob
+
+    job = _agent_job_row(db_session, "running")
+    service = RestoreService()
+    service.agent_restore_jobs[9] = job.id
+
+    with (
+        patch("app.services.restore_service.SessionLocal", testing_session_local),
+        patch(
+            "app.services.agent_job_dispatcher.dispatch_agent_cancel_if_connected",
+            AsyncMock(return_value=False),
+        ),
+    ):
+        assert await service.cancel_restore(9) is False
+        db_session.query(AgentJob).filter(AgentJob.id == job.id).update(
+            {AgentJob.updated_at: datetime(2026, 1, 1)}, synchronize_session=False
+        )
+        db_session.commit()
+        assert await service.cancel_restore(9) is False
+
+    db_session.expire_all()
+    stored = db_session.get(AgentJob, job.id)
+    assert stored.status == "cancel_requested"
+    assert stored.updated_at == datetime(2026, 1, 1)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_finished_restore_job_gets_no_cancel_command(
+    testing_session_local, db_session
+):
+    job = _agent_job_row(db_session, "completed")
+    service = RestoreService()
+    service.agent_restore_jobs[10] = job.id
+    dispatch = AsyncMock(return_value=True)
+
+    with (
+        patch("app.services.restore_service.SessionLocal", testing_session_local),
+        patch(
+            "app.services.agent_job_dispatcher.dispatch_agent_cancel_if_connected",
+            dispatch,
+        ),
+    ):
+        assert await service.cancel_restore(10) is False
+
+    dispatch.assert_not_awaited()

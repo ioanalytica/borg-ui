@@ -44,6 +44,10 @@ _RESTORE_TERMINAL_STATUSES = {
 # heartbeat, so it never gives a queued or dead-agent job a terminal path.
 _AGENT_RESTORE_CLAIM_TIMEOUT_SECONDS = 120
 _AGENT_RESTORE_STALL_TIMEOUT_SECONDS = 600
+# An agent reports a keepalive while its Borg is silent (0.1.7), which holds
+# off the stall timeout; this bounds how long a job may keep doing so without
+# any progress, so a hung but live process is not waited on forever.
+_AGENT_RESTORE_NO_PROGRESS_MAX_SECONDS = 6 * 3600
 
 
 def _http_detail_text(exc) -> str:
@@ -370,7 +374,9 @@ class RestoreService:
 
         started_at = time.monotonic()
         stale_since = started_at
-        last_marker = None
+        progress_since = started_at
+        last_progress = None
+        last_seen = None
 
         while True:
             db.expire_all()
@@ -397,31 +403,53 @@ class RestoreService:
             # Bound the wait: reset the stall timer whenever the agent job shows
             # any change, and fail if it never gets claimed or goes silent.
             now = time.monotonic()
-            marker = (
+            progress = (
                 agent_job.status,
                 agent_job.progress_percent,
                 agent_job.current_file,
             )
-            if marker != last_marker:
-                last_marker = marker
+            if progress != last_progress:
+                last_progress = progress
+                progress_since = now
+                stale_since = now
+            if agent_job.updated_at != last_seen:
+                # Any report, the agent's keepalive (0.1.7) included, shows
+                # the agent alive: a silent extract is not a stalled one.
+                last_seen = agent_job.updated_at
                 stale_since = now
             never_claimed = (
                 agent_job.status == "queued"
                 and now - started_at > _AGENT_RESTORE_CLAIM_TIMEOUT_SECONDS
             )
-            went_silent = now - stale_since > _AGENT_RESTORE_STALL_TIMEOUT_SECONDS
+            went_silent = (
+                now - stale_since > _AGENT_RESTORE_STALL_TIMEOUT_SECONDS
+                or now - progress_since > _AGENT_RESTORE_NO_PROGRESS_MAX_SECONDS
+            )
             if never_claimed or went_silent:
                 message = "agent did not complete the restore in time"
-                # Terminalize the agent job too: a still-queued job could
-                # otherwise be claimed later and run borg extract after we have
-                # already marked the restore failed.
-                _terminalize_agent_job(agent_job, message)
+                await self._stop_stalled_agent_job(db, agent_job, message)
                 self._fail_agent_restore(db, job, message)
                 await self._notify_agent_restore(db, job)
                 return
 
             db.commit()
             await asyncio.sleep(poll_interval_seconds)
+
+    async def _stop_stalled_agent_job(self, db, agent_job, message: str) -> None:
+        """A job no agent took is closed here, so it cannot be claimed and
+        run after the restore was failed; one an agent runs is asked to
+        stop, so Borg does not run on holding the repository."""
+        from app.services.agent_job_dispatcher import (
+            dispatch_agent_cancel_if_connected,
+        )
+
+        if agent_job.status in ("claimed", "running", "cancel_requested"):
+            agent_job.status = "cancel_requested"
+            agent_job.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            await dispatch_agent_cancel_if_connected(agent_job)
+            return
+        _terminalize_agent_job(agent_job, message)
 
     def _fail_agent_restore(self, db, job: Any, error: str) -> None:
         job.status = "failed"
@@ -1119,10 +1147,36 @@ class RestoreService:
                 return False
             from app.services.repository_executor import TERMINAL_AGENT_STATUSES
 
-            if agent_job.status not in TERMINAL_AGENT_STATUSES:
+            now = datetime.now(timezone.utc)
+            # A job no agent has taken is cancelled outright: no agent would
+            # pick up a `cancel_requested` one. Conditional, so a claim in
+            # between still gets the request below.
+            taken = (
+                db.query(AgentJob)
+                .filter(AgentJob.id == agent_job_id, AgentJob.status == "queued")
+                .update(
+                    {
+                        AgentJob.status: "canceled",
+                        AgentJob.completed_at: now,
+                        AgentJob.error_message: "Cancelled by user",
+                        AgentJob.updated_at: now,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            db.commit()
+            if taken:
+                return True
+            db.refresh(agent_job)
+            if agent_job.status in TERMINAL_AGENT_STATUSES:
+                # Finished meanwhile: nothing to stop, no command to send.
+                return False
+            if agent_job.status != "cancel_requested":
                 agent_job.status = "cancel_requested"
-                agent_job.updated_at = datetime.now(timezone.utc)
+                agent_job.updated_at = now
                 db.commit()
+            # A retry only sends the command again: a write would count as
+            # the agent's activity and hold off the stall timer and reaper.
             return await dispatch_agent_cancel_if_connected(agent_job)
         except Exception as exc:
             logger.error(

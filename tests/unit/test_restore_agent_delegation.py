@@ -243,6 +243,7 @@ async def test_await_agent_restore_fails_when_never_claimed(monkeypatch):
         status="queued",
         progress_percent=None,
         current_file=None,
+        updated_at=None,
         nfiles=None,
         original_size=None,
         id=5,
