@@ -1,12 +1,16 @@
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.websockets import WebSocketDisconnect
 
+import app.config as app_config
+from app.api.agents import _handle_agent_session_message
 from app.core.agent_auth import AGENT_AUTH_HEADER, AGENT_TOKEN_PREFIX_LENGTH
 from app.core.security import get_password_hash
 from app.database.models import (
@@ -2705,3 +2709,170 @@ async def test_script_and_backup_waiters_return_on_a_completion_with_warnings(
         poll_interval_seconds=0.01,
     )
     assert status_value == "completed_with_warnings"
+
+
+class TestAgentOperationLogLateLines:
+    """An agent sends its log lines over the session and its outcome over
+    REST, so the outcome often lands first. The operation's log file still
+    ends up with the whole transcript, in sequence order (#1076)."""
+
+    @pytest.fixture(autouse=True)
+    def _log_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(app_config.settings, "data_dir", str(tmp_path))
+
+    def _setup(self, test_client, test_db, admin_headers):
+        registered = _register_agent(
+            test_client, _create_enrollment_token(test_client, admin_headers)["token"]
+        )
+        agent = _get_agent(test_db, registered["agent_id"])
+        repository = Repository(name="agent-prune-log", path="/agent-prune-log")
+        test_db.add(repository)
+        test_db.commit()
+        operation = Operation(
+            repository_id=repository.id,
+            kind="prune",
+            category="maintenance",
+            status="running",
+            trigger="manual",
+            priority=10,
+            run_id="run-prune-log",
+        )
+        test_db.add(operation)
+        test_db.commit()
+        job = agent_maintenance_job(
+            test_db, agent, "prune", operation.id, repository=repository
+        )
+        return agent, _agent_headers(registered["agent_token"]), operation, job
+
+    def _post_line(self, test_client, headers, job, sequence):
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/logs",
+            json={
+                "sequence": sequence,
+                "stream": "stderr",
+                "message": f"line {sequence}",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+
+    def _finish(self, test_client, headers, job, outcome):
+        if outcome == "complete":
+            body = {"result": {"return_code": 0}}
+        else:
+            body = {"error_message": "borg exited with code 2", "return_code": 2}
+        response = test_client.post(
+            f"/api/agents/jobs/{job.id}/{outcome}", json=body, headers=headers
+        )
+        assert response.status_code == 200, response.text
+
+    def _log(self, test_db, operation):
+        test_db.refresh(operation)
+        with open(operation.log_file_path, encoding="utf-8") as handle:
+            return handle.read()
+
+    @pytest.mark.parametrize("outcome", ["complete", "fail"])
+    def test_lines_after_the_outcome_complete_the_file_in_order(
+        self, test_client, test_db, admin_headers, outcome
+    ):
+        _, headers, operation, job = self._setup(test_client, test_db, admin_headers)
+        self._post_line(test_client, headers, job, 1)
+        self._finish(test_client, headers, job, outcome)
+        assert self._log(test_db, operation) == "line 1"
+
+        self._post_line(test_client, headers, job, 3)
+        self._post_line(test_client, headers, job, 2)
+        self._post_line(test_client, headers, job, 2)
+
+        assert self._log(test_db, operation) == "line 1\nline 2\nline 3"
+        assert not os.path.exists(f"{operation.log_file_path}.tmp")
+
+    @pytest.mark.asyncio
+    async def test_session_lines_after_the_outcome_complete_the_file(
+        self, test_client, test_db, admin_headers
+    ):
+        agent, headers, operation, job = self._setup(
+            test_client, test_db, admin_headers
+        )
+        self._finish(test_client, headers, job, "complete")
+        assert self._log(test_db, operation) == ""
+
+        for sequence in (1, 2):
+            await _handle_agent_session_message(
+                test_db,
+                agent.id,
+                {
+                    "type": "log",
+                    "job_id": job.id,
+                    "sequence": sequence,
+                    "stream": "stderr",
+                    "message": f"line {sequence}",
+                },
+            )
+
+        # the socket keeps its database session; no transaction is left open
+        assert not test_db.in_transaction()
+        assert self._log(test_db, operation) == "line 1\nline 2"
+
+    def test_a_line_while_the_job_runs_writes_no_file(
+        self, test_client, test_db, admin_headers
+    ):
+        _, headers, operation, job = self._setup(test_client, test_db, admin_headers)
+        self._post_line(test_client, headers, job, 1)
+
+        test_db.refresh(operation)
+        assert operation.log_file_path is None
+
+    def test_a_removed_log_file_is_not_written_again(
+        self, test_client, test_db, admin_headers
+    ):
+        _, headers, operation, job = self._setup(test_client, test_db, admin_headers)
+        self._finish(test_client, headers, job, "complete")
+        test_db.refresh(operation)
+        os.remove(operation.log_file_path)
+
+        self._post_line(test_client, headers, job, 1)
+
+        assert not os.path.exists(operation.log_file_path)
+
+    def test_a_failed_rewrite_keeps_the_file_and_removes_the_temp_file(
+        self, test_client, test_db, admin_headers
+    ):
+        _, headers, operation, job = self._setup(test_client, test_db, admin_headers)
+        self._post_line(test_client, headers, job, 1)
+        self._finish(test_client, headers, job, "complete")
+        self._post_line(test_client, headers, job, 3)
+
+        with patch("app.api.agents.os.replace", side_effect=OSError("disk full")):
+            self._post_line(test_client, headers, job, 2)
+
+        assert self._log(test_db, operation) == "line 1\nline 3"
+        assert not os.path.exists(f"{operation.log_file_path}.tmp")
+
+    @pytest.mark.asyncio
+    async def test_a_failure_while_completing_the_file_keeps_upload_and_session(
+        self, test_client, test_db, admin_headers
+    ):
+        agent, headers, operation, job = self._setup(
+            test_client, test_db, admin_headers
+        )
+        self._finish(test_client, headers, job, "complete")
+
+        with patch(
+            "app.api.agents._get_repository_operation_job",
+            side_effect=SQLAlchemyError("connection lost"),
+        ):
+            self._post_line(test_client, headers, job, 1)
+            await _handle_agent_session_message(
+                test_db,
+                agent.id,
+                {
+                    "type": "log",
+                    "job_id": job.id,
+                    "sequence": 2,
+                    "stream": "stderr",
+                    "message": "line 2",
+                },
+            )
+
+        assert test_db.query(AgentJobLog).filter_by(agent_job_id=job.id).count() == 2

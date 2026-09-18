@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -792,6 +793,69 @@ def _finish_linked_repository_operation_job(
             )
 
 
+def _complete_finished_operation_log(
+    db: Session, agent_job_id: int, sequence: int, message: str
+) -> None:
+    """Add a log line that arrived after its agent job finished to the linked
+    maintenance operation's log file.
+
+    The agent sends log lines over its session and the outcome over REST, so
+    lines often land after `_finish_linked_repository_operation_job` wrote
+    the file from the rows present then. Called once the new line is
+    committed. That commit also updates the job row, so it waits for a
+    completion in flight: a job still active here is completed later, from a
+    snapshot that has this line. A line after all others is appended; one
+    that arrived out of order rewrites the file from all rows."""
+    try:
+        status_value = (
+            db.query(AgentJob.status).filter(AgentJob.id == agent_job_id).scalar()
+        )
+        if status_value not in FINAL_AGENT_JOB_STATUSES:
+            return
+        job = db.get(AgentJob, agent_job_id)
+        operation_job = _get_repository_operation_job(job, db) if job else None
+        path = getattr(operation_job, "log_file_path", None)
+        if not path or not os.path.isfile(path):
+            # never written, or removed by log retention
+            return
+        out_of_order = (
+            db.query(AgentJobLog.id)
+            .filter(
+                AgentJobLog.agent_job_id == agent_job_id,
+                AgentJobLog.sequence > sequence,
+            )
+            .first()
+        )
+        if out_of_order is None:
+            separator = "\n" if os.path.getsize(path) else ""
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(separator + message)
+            return
+        tmp_path = f"{path}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                handle.write(_collect_agent_logs(job, db))
+            os.replace(tmp_path, path)
+        except OSError:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+    except Exception as exc:
+        # best effort: the line is stored; a failure here must not fail the
+        # upload or end the agent's session
+        logger.warning(
+            "Failed to complete agent operation log",
+            agent_job_id=agent_job_id,
+            error=str(exc),
+        )
+    finally:
+        # The session socket keeps its session open; end this read
+        # transaction so its connection goes back to the pool.
+        db.rollback()
+
+
 def _get_agent_token_from_websocket(websocket: WebSocket) -> Optional[str]:
     auth_header = websocket.headers.get(AGENT_AUTH_HEADER)
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -1229,7 +1293,8 @@ async def _handle_agent_session_message(
             job_id=_parse_int(job_id, default=0) or None,
         )
         if job:
-            _append_agent_job_log(
+            agent_job_id = job.id
+            appended = _append_agent_job_log(
                 job,
                 db,
                 sequence=sequence,
@@ -1238,6 +1303,8 @@ async def _handle_agent_session_message(
                 created_at=_parse_optional_datetime(message.get("created_at")),
             )
             db.commit()
+            if appended:
+                _complete_finished_operation_log(db, agent_job_id, sequence, text)
         return
 
     if message_type == "command_result":
@@ -1676,6 +1743,7 @@ async def upload_job_log(
     )
     job.updated_at = _now_utc()
     db.commit()
+    _complete_finished_operation_log(db, job_id, payload.sequence, payload.message)
 
     return AgentJobLogResponse(accepted=True, duplicate=False)
 
