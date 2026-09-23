@@ -27,7 +27,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+import structlog
 from sqlalchemy import case, func, nullslast, or_, tuple_
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session
 
 from app.database.models import (
@@ -40,6 +43,17 @@ from app.database.models import (
 from app.services.operations.details import backup_details
 from app.services.operations.vocab import TERMINAL_STATUSES
 from app.utils.backup_maintenance import RUNNING_BACKUP_MAINTENANCE_FAILURES
+
+logger = structlog.get_logger()
+
+# A caller waits for its backup operation by reading it from the database. A
+# read that fails is not a failed backup, so the caller waits again, sleeping
+# BACKOFF, 2*BACKOFF, ... seconds, at most MAX_BACKOFF, between attempts.
+BACKUP_WAIT_BACKOFF_SECONDS = 2.0
+BACKUP_WAIT_MAX_BACKOFF_SECONDS = 30.0
+# The errors a database that is locked, gone or out of connections raises;
+# anything else does not go away by waiting.
+TRANSIENT_DATABASE_ERRORS = (OperationalError, InterfaceError, PoolTimeoutError)
 
 CANCELLED_BY_USER = json.dumps({"key": "backend.errors.backup.cancelledByUser"})
 CANCELLED_PROCESS_NOT_FOUND = json.dumps(
@@ -385,6 +399,53 @@ async def wait_for_backup_operation(
             cancel_sent = True
             await operation_runner.request_cancel(operation_id)
         await asyncio.sleep(poll_interval_seconds)
+
+
+async def wait_out_backup_operation(
+    operation_id: int,
+    *,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+) -> str:
+    """`wait_for_backup_operation` on a session of its own, waited again when
+    a read fails.
+
+    The runner owns the operation, so a failed read while waiting stops
+    neither the backup nor the wait: the caller takes the outcome of its
+    backup, not of its reads, and its follow-up work never runs under a live
+    backup. Only a database error is waited out; any other error reaches the
+    caller as before.
+
+    Each wait polls on a session of its own, closed when it ends, so a failed
+    read never leaves the caller's session, whose rows record the outcome, in
+    a state that needs a rollback first.
+    """
+    from app.database.database import SessionLocal
+
+    failed_waits = 0
+    delay = BACKUP_WAIT_BACKOFF_SECONDS
+    while True:
+        db = SessionLocal()
+        try:
+            return await wait_for_backup_operation(
+                db, operation_id, is_cancelled=is_cancelled
+            )
+        except TRANSIENT_DATABASE_ERRORS as exc:
+            failed_waits += 1
+            logger.warning(
+                "Waiting for the backup failed, waiting again",
+                operation_id=operation_id,
+                attempt=failed_waits,
+                error=str(exc),
+            )
+        finally:
+            try:
+                db.close()
+            except Exception:
+                # A connection too broken to roll back is dropped instead of
+                # returned to the pool.
+                db.invalidate()
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, BACKUP_WAIT_MAX_BACKOFF_SECONDS)
 
 
 def backup_job_has_logs(
