@@ -180,10 +180,16 @@ def failure_text(error: BaseException) -> str:
 
 
 async def fail_inline_maintenance(
-    db: Session, operation: Operation, error: BaseException
+    db: Session,
+    operation: Operation,
+    error: BaseException,
+    *,
+    skip_reason: Optional[str] = None,
 ) -> bool:
     """Close an inline operation whose caller raised instead of writing the
-    terminal status, and say whether it did.
+    terminal status, and say whether it did. With `skip_reason` the row is
+    closed `skipped` for that reason instead of `failed`: the work never
+    started and the caller asks for it again later.
 
     A row that already reached a terminal status (the agent path fails it
     itself when its job is refused) is kept as written. So is a row a live
@@ -221,7 +227,8 @@ async def fail_inline_maintenance(
             .filter(Operation.id == operation_id, Operation.status == "running")
             .update(
                 {
-                    Operation.status: "failed",
+                    Operation.status: "skipped" if skip_reason else "failed",
+                    Operation.skip_reason: skip_reason,
                     # a diagnostic the service recorded before raising is
                     # more specific than the exception that wrapped it
                     Operation.error_message: func.coalesce(

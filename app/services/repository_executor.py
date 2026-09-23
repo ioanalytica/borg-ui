@@ -423,7 +423,10 @@ def queue_agent_repository_operation_job(
     operation: Optional[dict[str, Any]] = None,
     maintenance_job_kind: Optional[str] = None,
     maintenance_job_id: Optional[int] = None,
+    ignore_queued_operations: bool = False,
 ) -> AgentJob:
+    """`ignore_queued_operations`: see `list_active_repository_work`; for a
+    caller the operations runner started through the repository lane."""
     agent = validate_agent_repository_operation(db, repository, job_kind=job_kind)
     operation_payload = operation
     admission_operation = operation_for_agent_job_kind(job_kind)
@@ -438,6 +441,7 @@ def queue_agent_repository_operation_job(
             "operations" if maintenance_job_kind else None,
             maintenance_job_id,
         ),
+        ignore_queued_operations=ignore_queued_operations,
     )
     now = datetime.utcnow()
     agent_job = AgentJob(
