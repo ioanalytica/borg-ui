@@ -1,8 +1,8 @@
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Eye, Download, Trash2, Lock, Play, AlertCircle, FolderOpen, RotateCcw } from 'lucide-react'
 import { toast } from 'react-hot-toast'
-import { useQueryClient, useQuery } from '@tanstack/react-query'
+import { useQueryClient, useQuery, type QueryKey } from '@tanstack/react-query'
 import type { ActionButton } from '../RowActions'
 import { Job, Repository } from '../../types/jobs'
 import ErrorDetailsDialog from '../ErrorDetailsDialog'
@@ -18,6 +18,11 @@ import { isV2Repo } from '../../utils/repoCapabilities'
 import ArchiveContentsDialog from '../ArchiveContentsDialog'
 import type { Repository as FullRepository, Archive } from '../../types'
 import { getBackupJobRetryDisabledReason, shouldShowRetryAction } from './jobLabels'
+import { JOB_LIST_QUERY_KEYS, withoutJob } from './jobCache'
+
+// A row's identity for a pending delete: a script execution and an
+// operation can share an id. The delete call reads a missing type as backup.
+const deleteKey = (job: Job) => `${job.type || 'backup'}-${job.id}`
 
 type CanBreakLocks<T extends Job> = boolean | ((job: T) => boolean)
 
@@ -191,64 +196,83 @@ export function useJobActions<T extends Job = Job>({
     }
   }
 
+  // Deletes still waiting for the server, by type and id. A refetch while
+  // one is out would bring its row back, so the lists are refetched once
+  // the last settles; a row that comes back anyway (a poll, an operation
+  // event) keeps its Delete disabled, since a second request could only
+  // answer "job not found". The ref is read synchronously, the state renders.
+  const pendingDeletes = useRef(new Set<string>())
+  const [deletingKeys, setDeletingKeys] = useState<ReadonlySet<string>>(() => new Set())
+  const setDeleting = (key: string, deleting: boolean) => {
+    if (deleting) pendingDeletes.current.add(key)
+    else pendingDeletes.current.delete(key)
+    setDeletingKeys(new Set(pendingDeletes.current))
+  }
+  const isDeleting = (job: T) => deletingKeys.has(deleteKey(job))
+  // Deletes overlap, so one rollback must not undo another's removal. The
+  // lists are kept as they were before the first of a series of deletes,
+  // with the rows of every delete in the series that has not failed.
+  const seriesBase = useRef<[QueryKey, unknown][] | null>(null)
+  const seriesRemoved = useRef(new Map<string, { id: string | number; type: string }>())
+
   const handleConfirmDelete = async () => {
     if (!deleteJob) return
 
     const jobToDelete = deleteJob
     const jobType = jobToDelete.type || 'backup'
+    const key = deleteKey(jobToDelete)
 
     // Close dialog immediately for better UX
     setDeleteJob(null)
+    if (pendingDeletes.current.has(key)) return
 
-    // Store previous data for rollback on error
-    const queryKeys = [
-      ['backup-status-manual'],
-      ['backup-status-scheduled'],
-      ['backup-status'],
-      ['activity'],
-      ['recent-backup-jobs'],
-    ]
-
-    // Optimistically update all query caches by removing the deleted job
-    const previousData = queryKeys.map((queryKey) => {
-      const previous = queryClient.getQueryData(queryKey)
-      if (previous) {
-        queryClient.setQueryData(queryKey, (old: unknown) => {
-          if (!old) return old
-          // Handle different data structures
-          if (Array.isArray(old)) {
-            return old.filter((job) => (job as T).id !== jobToDelete.id)
-          }
-          if (typeof old === 'object' && old !== null && 'jobs' in old) {
-            const oldData = old as { jobs: T[] }
-            if (Array.isArray(oldData.jobs)) {
-              return { ...oldData, jobs: oldData.jobs.filter((job) => job.id !== jobToDelete.id) }
-            }
-          }
-          return old
-        })
-      }
-      return { queryKey, data: previous }
-    })
-
+    setDeleting(key, true)
     try {
+      // A fetch already under way would bring the row back when it lands.
+      await Promise.all(
+        JOB_LIST_QUERY_KEYS.map((queryKey) => queryClient.cancelQueries({ queryKey }))
+      )
+
+      // Remove the row from every cached list that may show it, whatever
+      // filters the list is keyed by.
+      seriesBase.current ??= JOB_LIST_QUERY_KEYS.flatMap((queryKey) =>
+        queryClient.getQueriesData({ queryKey })
+      )
+      const job = { id: jobToDelete.id, type: jobType }
+      seriesRemoved.current.set(key, job)
+      JOB_LIST_QUERY_KEYS.forEach((queryKey) =>
+        queryClient.setQueriesData({ queryKey }, (old: unknown) => withoutJob(old, job))
+      )
+
       // Call delete API
       await activityAPI.deleteJob(jobType, jobToDelete.id)
 
       // Success - show toast after item is already removed from UI
       toast.success(t('backupJobsTable.toasts.deleteSuccess'))
     } catch (error) {
-      // Rollback optimistic updates on error
-      previousData.forEach(({ queryKey, data }) => {
-        if (data !== undefined) {
-          queryClient.setQueryData(queryKey, data)
-        }
+      // Put the row back, and only this row
+      seriesRemoved.current.delete(key)
+      const stillRemoved = [...seriesRemoved.current.values()]
+      seriesBase.current?.forEach(([queryKey, data]) => {
+        queryClient.setQueryData(
+          queryKey,
+          stillRemoved.reduce((rows, job) => withoutJob(rows, job), data)
+        )
       })
 
       toast.error(
         error instanceof Error ? error.message : t('backupJobsTable.toasts.failedToDelete')
       )
       console.error(error)
+    } finally {
+      setDeleting(key, false)
+    }
+    // The server stays the source of truth: a delete sends no operation
+    // event, and the Activity feed stops polling once it is paged into.
+    if (pendingDeletes.current.size === 0) {
+      seriesBase.current = null
+      seriesRemoved.current.clear()
+      JOB_LIST_QUERY_KEYS.forEach((queryKey) => queryClient.invalidateQueries({ queryKey }))
     }
   }
 
@@ -470,7 +494,11 @@ export function useJobActions<T extends Job = Job>({
       label: t('backupJobsTable.actions.delete'),
       onClick: handleDeleteClick,
       color: 'error',
-      tooltip: t('backupJobsTable.actions.delete'),
+      disabled: isDeleting,
+      tooltip: (job) =>
+        isDeleting(job)
+          ? t('backupJobsTable.actions.deleting')
+          : t('backupJobsTable.actions.delete'),
       show: (job) => job.status !== 'running' && job.type !== 'availability_check', // Availability decisions are immutable history, not jobs.
     })
   }
