@@ -3057,9 +3057,7 @@ async def dispatch_due_scheduled_backups(
 
             try:
                 asyncio.create_task(
-                    notification_service.send_schedule_failure(
-                        db, job.name, job.repository, str(e)
-                    )
+                    _send_schedule_failure(job.name, job.repository, str(e))
                 )
             except Exception as notif_error:
                 logger.warning(
@@ -3075,6 +3073,22 @@ async def dispatch_due_scheduled_backups(
             dispatched=dispatched,
             limit=max_scheduled_backups,
         )
+
+
+async def _send_schedule_failure(
+    schedule_name: str, repository_name: Optional[str], error_message: str
+) -> None:
+    """Send a schedule failure alert on its own session.
+
+    It runs as a task past the scheduler's cycle, which closes its session.
+    """
+    db = SessionLocal()
+    try:
+        await notification_service.send_schedule_failure(
+            db, schedule_name, repository_name, error_message
+        )
+    finally:
+        db.close()
 
 
 async def check_scheduled_jobs():

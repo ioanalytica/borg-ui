@@ -1288,3 +1288,212 @@ def test_resolve_report_timezone_invalid_config_falls_back_to_container(test_db)
 
     # Invalid configured value must not short-circuit to UTC
     assert str(tz) == "Asia/Kolkata"
+
+
+async def _longest_loop_gap(coro, interval=0.05):
+    """Await ``coro`` next to a heartbeat task and return the longest tick gap."""
+    import asyncio
+    import time
+
+    ticks = []
+
+    async def heartbeat():
+        while True:
+            ticks.append(time.monotonic())
+            await asyncio.sleep(interval)
+
+    task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(interval)
+    try:
+        await coro
+        await asyncio.sleep(interval)
+    finally:
+        task.cancel()
+    return max(later - earlier for earlier, later in zip(ticks, ticks[1:]))
+
+
+def _slow_notify(seconds, seen_timeouts=None):
+    import socket
+    import time
+
+    def notify(**kwargs):
+        if seen_timeouts is not None:
+            seen_timeouts.append(socket.getdefaulttimeout())
+        time.sleep(seconds)
+        if seen_timeouts is not None:
+            seen_timeouts.append(socket.getdefaulttimeout())
+        return True
+
+    return notify
+
+
+@pytest.mark.asyncio
+async def test_slow_delivery_does_not_block_event_loop(
+    test_db, mock_apprise, mock_repository, email_notification_setting
+):
+    """A slow endpoint must not stall the event loop while it is delivering."""
+    apprise_instance = mock_apprise.return_value
+    apprise_instance.add.return_value = True
+    apprise_instance.notify.side_effect = _slow_notify(1.0)
+
+    gap = await _longest_loop_gap(
+        notification_service.send_backup_failure(
+            test_db, mock_repository.name, "boom", job_id=1
+        )
+    )
+
+    assert apprise_instance.notify.call_count == 1
+    assert gap < 0.5
+
+
+@pytest.mark.asyncio
+async def test_slow_test_notification_does_not_block_event_loop(mock_apprise):
+    """The settings page's test send must not stall the event loop either."""
+    apprise_instance = mock_apprise.return_value
+    apprise_instance.add.return_value = True
+    apprise_instance.notify.side_effect = _slow_notify(1.0)
+
+    result = {}
+
+    async def run():
+        result.update(
+            await notification_service.test_notification("json://localhost/hook")
+        )
+
+    gap = await _longest_loop_gap(run())
+
+    assert result["success"] is True
+    assert gap < 0.5
+
+
+@pytest.mark.asyncio
+async def test_concurrent_deliveries_keep_socket_timeout_consistent(
+    test_db, mock_apprise, mock_repository, email_notification_setting
+):
+    """Overlapping sends each see the 60 s default and restore the original one."""
+    import asyncio
+    import socket
+
+    seen = []
+    apprise_instance = mock_apprise.return_value
+    apprise_instance.add.return_value = True
+    apprise_instance.notify.side_effect = _slow_notify(0.3, seen)
+
+    original = socket.getdefaulttimeout()
+    await asyncio.gather(
+        notification_service.send_backup_failure(
+            test_db, mock_repository.name, "first", job_id=1
+        ),
+        notification_service.send_backup_failure(
+            test_db, mock_repository.name, "second", job_id=2
+        ),
+    )
+
+    assert apprise_instance.notify.call_count == 2
+    assert seen == [60, 60, 60, 60]
+    assert socket.getdefaulttimeout() == original
+
+
+@pytest.mark.asyncio
+async def test_setting_deleted_during_delivery_keeps_caller_session_usable(
+    test_db, mock_apprise, mock_repository, email_notification_setting
+):
+    """Deleting the service mid-send must not break the caller's session."""
+    from sqlalchemy.orm import Session
+
+    setting_id = email_notification_setting.id
+
+    def notify_while_setting_is_deleted(**kwargs):
+        with Session(bind=test_db.get_bind()) as other:
+            other.delete(other.get(NotificationSettings, setting_id))
+            other.commit()
+        return True
+
+    apprise_instance = mock_apprise.return_value
+    apprise_instance.add.return_value = True
+    apprise_instance.notify.side_effect = notify_while_setting_is_deleted
+
+    mock_repository.path = "/tmp/renamed-repo"
+    await notification_service.send_backup_failure(
+        test_db, mock_repository.name, "boom", job_id=1
+    )
+    test_db.commit()
+
+    with Session(bind=test_db.get_bind()) as fresh:
+        assert fresh.get(Repository, mock_repository.id).path == "/tmp/renamed-repo"
+        assert fresh.get(NotificationSettings, setting_id) is None
+
+
+@pytest.mark.asyncio
+async def test_queued_deliveries_leave_default_executor_free(mock_apprise):
+    """Sends waiting their turn must not hold workers of the default executor."""
+    import asyncio
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    apprise_instance = mock_apprise.return_value
+    apprise_instance.add.return_value = True
+    apprise_instance.notify.side_effect = _slow_notify(0.5)
+
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=2)
+    loop.set_default_executor(executor)
+    try:
+        sends = [
+            asyncio.create_task(
+                notification_service.test_notification("json://localhost/hook")
+            )
+            for _ in range(3)
+        ]
+        await asyncio.sleep(0.05)
+        started = time.monotonic()
+        await asyncio.to_thread(lambda: None)
+        waited = time.monotonic() - started
+        await asyncio.gather(*sends)
+    finally:
+        executor.shutdown(wait=True)
+
+    assert waited < 0.25
+
+
+@pytest.mark.asyncio
+async def test_setting_deleted_while_another_delivers_is_skipped(
+    test_db, mock_apprise, mock_repository
+):
+    """A service deleted during an earlier send is skipped; later ones still get it."""
+    from sqlalchemy.orm import Session
+
+    urls = {}
+    for name in ("A", "B", "C"):
+        setting = NotificationSettings(
+            name=name,
+            service_url=f"json://localhost/{name}",
+            enabled=True,
+            notify_on_backup_failure=True,
+        )
+        test_db.add(setting)
+        test_db.commit()
+        urls[setting.service_url] = setting.id
+
+    added = []
+    deleted = []
+
+    def notify_and_delete_a_pending_setting(**kwargs):
+        if not deleted:
+            pending = next(url for url in urls if url not in added)
+            with Session(bind=test_db.get_bind()) as other:
+                other.delete(other.get(NotificationSettings, urls[pending]))
+                other.commit()
+            deleted.append(pending)
+        return True
+
+    apprise_instance = mock_apprise.return_value
+    apprise_instance.add.side_effect = lambda url: added.append(url) or True
+    apprise_instance.notify.side_effect = notify_and_delete_a_pending_setting
+
+    await notification_service.send_backup_failure(
+        test_db, mock_repository.name, "boom", job_id=1
+    )
+
+    assert apprise_instance.notify.call_count == 2
+    assert sorted(added) == sorted(url for url in urls if url not in deleted)

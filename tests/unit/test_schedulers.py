@@ -759,3 +759,75 @@ async def test_start_mqtt_sync_scheduler_delegates_to_periodic_sync():
         await start_mqtt_sync_scheduler()
 
     mock_periodic.assert_awaited_once_with(5)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_schedule_failure_notification_outlives_the_scheduler_session(
+    db_session,
+):
+    """The failure alert reaches every service after the scheduler closes its session."""
+    from app.database.models import NotificationSettings
+
+    repo = Repository(
+        name="Repo",
+        path="/tmp/repo",
+        encryption="none",
+        compression="lz4",
+        repository_type="local",
+    )
+    db_session.add(repo)
+    db_session.flush()
+    db_session.add(
+        ScheduledJob(
+            name="Failing schedule",
+            cron_expression="0 2 * * *",
+            enabled=True,
+            repository_id=repo.id,
+            next_run=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+    )
+    for name in ("A", "B"):
+        db_session.add(
+            NotificationSettings(
+                name=name,
+                service_url=f"json://localhost/{name}",
+                enabled=True,
+                notify_on_schedule_failure=True,
+            )
+        )
+    db_session.commit()
+
+    delivered = []
+
+    def notify_while_the_scheduler_moves_on(**kwargs):
+        if not delivered:
+            # The scheduler finishes its cycle during the first delivery.
+            db_session.commit()
+            db_session.close()
+        delivered.append(kwargs["title"])
+        return True
+
+    tasks_before = asyncio.all_tasks()
+    with (
+        patch.object(
+            schedule_api,
+            "_dispatch_due_scheduled_job",
+            side_effect=RuntimeError("dispatch failed"),
+        ),
+        patch.object(
+            schedule_api,
+            "SessionLocal",
+            sessionmaker(autocommit=False, autoflush=False, bind=db_session.get_bind()),
+        ),
+        patch("app.services.notification_service.apprise.Apprise") as mock_apprise,
+    ):
+        mock_apprise.return_value.add.return_value = True
+        mock_apprise.return_value.notify.side_effect = (
+            notify_while_the_scheduler_moves_on
+        )
+        await dispatch_due_scheduled_backups(db_session, datetime.now(timezone.utc))
+        (notification_task,) = asyncio.all_tasks() - tasks_before
+        await notification_task
+
+    assert len(delivered) == 2
