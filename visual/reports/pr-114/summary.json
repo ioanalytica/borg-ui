@@ -1,19 +1,19 @@
 {
-  "generatedAt": "2026-09-28T15:08:39.569Z",
+  "generatedAt": "2026-09-28T16:09:56.739Z",
   "reportUrl": "",
   "metadata": {
     "title": "PR #114 visual report",
     "commitSha": "a435f1a4e660",
-    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/36441116241"
+    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/36448854937"
   },
   "totals": {
     "baseline": 1030,
     "actual": 1042,
     "compared": 1030,
-    "changed": 13,
+    "changed": 12,
     "added": 12,
     "removed": 0,
-    "unchanged": 1017
+    "unchanged": 1018
   },
   "changed": [
     {
@@ -50,24 +50,6 @@
       "actual": {
         "width": 390,
         "height": 844
-      }
-    },
-    {
-      "fileName": "components-statusbadge--completed-with-warnings.png",
-      "baselinePath": "images/baseline/components-statusbadge--completed-with-warnings.png",
-      "actualPath": "images/actual/components-statusbadge--completed-with-warnings.png",
-      "diffPath": "images/diff/components-statusbadge--completed-with-warnings.png",
-      "diffPixels": 1024000,
-      "totalPixels": 1024000,
-      "diffRatio": 1,
-      "dimensionsChanged": false,
-      "baseline": {
-        "width": 1280,
-        "height": 800
-      },
-      "actual": {
-        "width": 1280,
-        "height": 800
       }
     },
     {
@@ -2420,6 +2402,9 @@
     },
     {
       "fileName": "components-statusbadge--completed-with-warnings--mobile.png"
+    },
+    {
+      "fileName": "components-statusbadge--completed-with-warnings.png"
     },
     {
       "fileName": "components-statusbadge--completed.png"
