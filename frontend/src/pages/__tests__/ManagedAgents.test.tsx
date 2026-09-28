@@ -152,7 +152,14 @@ describe('ManagedAgents', () => {
     expect(
       await screen.findByText(/Run this on a remote machine to register it/i)
     ).toBeInTheDocument()
-    expect(screen.getByText(/curl -fsSL .*\/agent\/install\.sh/)).toBeInTheDocument()
+    // One command per platform: root on Linux, the signed-in user on macOS.
+    const commands = screen.getAllByText(/curl -fsSL .*\/agent\/install\.sh/)
+    expect(commands).toHaveLength(2)
+    expect(commands[0]).toHaveTextContent('| sudo bash -s --')
+    expect(commands[0]).toHaveTextContent('--service-user current')
+    expect(commands[1]).toHaveTextContent('| bash -s --')
+    expect(commands[1]).not.toHaveTextContent('sudo')
+    expect(commands[1]).not.toHaveTextContent('--service-user')
     expect(screen.getByRole('button', { name: /setup help/i })).toBeInTheDocument()
   })
 

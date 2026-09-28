@@ -58,7 +58,9 @@ def _get_text(url: str) -> str:
 
 def current_version() -> str:
     """The rclone version the runtime base pins, from the single source of truth."""
-    match = re.search(r"^RCLONE_VERSION=(\S+)", ENV_FILE.read_text(encoding="utf-8"), re.M)
+    match = re.search(
+        r"^RCLONE_VERSION=(\S+)", ENV_FILE.read_text(encoding="utf-8"), re.M
+    )
     if not match:
         raise SystemExit(f"No RCLONE_VERSION in {ENV_FILE.name}")
     return match.group(1)

@@ -944,6 +944,7 @@ const Archives: React.FC = () => {
               onMountArchive={openMountDialog}
               onDeleteArchive={(archive) => setShowDeleteConfirm(archive)}
               mountDisabled={mountArchiveMutation.isPending}
+              mountHidden={!selectedRepository || selectedRepository.executor_type === 'agent'}
               canDelete={
                 getRepoCapabilities({ mode: selectedRepository?.mode }).canDeleteArchive &&
                 (selectedRepositoryId

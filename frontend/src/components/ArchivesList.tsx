@@ -44,6 +44,7 @@ interface ArchivesListProps {
   /** Omit when the user cannot restore from this repository. */
   onRestoreArchive?: (archive: Archive) => void
   onMountArchive: (archive: Archive) => void
+  mountHidden?: boolean
   onDeleteArchive: (archive: Archive) => void
   mountDisabled?: boolean
   canDelete?: boolean
@@ -61,6 +62,7 @@ export default function ArchivesList({
   onMountArchive,
   onDeleteArchive,
   mountDisabled = false,
+  mountHidden = false,
   canDelete = true,
   defaultRowsPerPage = 10,
   rowsPerPageOptions = [5, 10, 25, 50, 100],
@@ -652,6 +654,7 @@ export default function ArchivesList({
                     onMount={onMountArchive}
                     onDelete={onDeleteArchive}
                     mountDisabled={mountDisabled}
+                    mountHidden={mountHidden}
                     canDelete={canDelete}
                   />
                 ))}
@@ -684,6 +687,7 @@ export default function ArchivesList({
                   onMount={onMountArchive}
                   onDelete={onDeleteArchive}
                   mountDisabled={mountDisabled}
+                  mountHidden={mountHidden}
                   canDelete={canDelete}
                 />
               ))}

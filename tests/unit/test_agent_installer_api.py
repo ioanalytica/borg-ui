@@ -44,7 +44,8 @@ def test_agent_installer_script_supports_tokenless_reinstall_mode(
 
     assert "--reinstall" in response.text
     assert 'REINSTALL="0"' in response.text
-    assert "Reinstall mode requires an existing /etc/borg-ui-agent/config.toml" in (
+    assert 'CONFIG_DIR="/etc/borg-ui-agent"' in response.text
+    assert "Reinstall mode requires an existing ${CONFIG_DIR}/config.toml" in (
         response.text
     )
     assert "Preserving existing agent registration" in response.text
@@ -75,8 +76,8 @@ def test_agent_installer_script_supports_service_user_modes(
     assert "resolve_current_service_user" in response.text
     assert "resolve_service_identity" in response.text
     assert (
-        "export DEBIAN_FRONTEND=noninteractive\nresolve_service_identity\n\napt-get update"
-        in (response.text)
+        "  export DEBIAN_FRONTEND=noninteractive\n  resolve_service_identity\n\n"
+        "  apt-get update" in (response.text)
     )
     assert (
         "SUDO_USER is not set. Re-run with sudo from a non-root user" in response.text
@@ -95,10 +96,8 @@ def test_agent_installer_script_uses_selected_service_identity(
         'install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0750 /etc/borg-ui-agent'
         in (response.text)
     )
-    assert (
-        'runuser -u "${SERVICE_USER}" -- /opt/borg-ui-agent/.venv/bin/borg-ui-agent'
-        in (response.text)
-    )
+    assert 'runuser -u "${SERVICE_USER}" -- "$@"' in response.text
+    assert 'as_service_user "${AGENT_ROOT}/.venv/bin/borg-ui-agent"' in (response.text)
     assert "User=${SERVICE_USER}" in response.text
     assert "Group=${SERVICE_GROUP}" in response.text
     assert "WorkingDirectory=${SERVICE_HOME}" in response.text
@@ -114,8 +113,8 @@ def test_agent_installer_script_reinstall_preserves_existing_service_user(
     assert 'SERVICE_USER_MODE_SET="0"' in response.text
     assert 'SERVICE_USER_MODE_SET="1"' in response.text
     assert (
-        '[[ "${REINSTALL}" == "1" && "${SERVICE_USER_MODE_SET}" == "0" ]]'
-        in response.text
+        '[[ "${PLATFORM}" == "Linux" && "${REINSTALL}" == "1" '
+        '&& "${SERVICE_USER_MODE_SET}" == "0" ]]' in response.text
     )
     assert "/etc/systemd/system/borg-ui-agent.service" in response.text
     assert "awk -F= '/^User=/" in response.text
@@ -128,12 +127,10 @@ def test_agent_installer_script_prepares_config_for_selected_service_user(
     response = test_client.get("/agent/install.sh")
 
     assert "prepare_agent_config_path" in response.text
-    assert "rm -f /etc/borg-ui-agent/config.toml" in response.text
-    assert (
-        'chown "${SERVICE_USER}:${SERVICE_GROUP}" /etc/borg-ui-agent/config.toml'
-        in response.text
-    )
-    assert "chmod 0600 /etc/borg-ui-agent/config.toml" in response.text
+    assert 'local config_path="${CONFIG_DIR}/config.toml"' in response.text
+    assert 'rm -f "${config_path}"' in response.text
+    assert 'chown "${SERVICE_USER}:${SERVICE_GROUP}" "${config_path}"' in response.text
+    assert 'chmod 0600 "${config_path}"' in response.text
 
 
 def test_agent_installer_grants_read_capability_to_non_root_service(
@@ -167,8 +164,8 @@ def test_agent_installer_script_installs_borg_without_a_build_toolchain(
     """Borg publishes no wheels, so a pip install would compile on every node."""
     response = test_client.get("/agent/install.sh")
 
-    assert "sha256sum -c -" in response.text
-    assert 'install -o root -g root -m 0755 "${tmp}" "${dest}"' in response.text
+    assert 'verify_sha256 "${BINARY_SHA}" "${tmp}"' in response.text
+    assert 'install -m 0755 "${tmp}" "${dest}"' in response.text
     assert "borgbackup>=2.0.0b1,<3" not in response.text
     assert "build-essential" not in response.text
     assert "libxxhash-dev" not in response.text
@@ -198,9 +195,9 @@ def test_agent_installer_script_names_the_fallback_for_unsupported_platforms(
 
 
 _INSTALLER_FUNCTIONS = (
-    "glibc_at_least",
+    "machine_floor_at_least",
     "select_borg_binary",
-    "lowest_glibc_offered",
+    "lowest_floor_offered",
     "borg_fallback_advice",
     "install_borg_from_server",
 )
@@ -219,8 +216,11 @@ def _run_install_borg_from_server(
     harness = "\n".join(
         [
             functions,
+            'PLATFORM="Linux"',
+            'MACHINE_PLATFORM="linux"',
             'MACHINE_ARCH="x86_64"',
-            f'MACHINE_GLIBC="{glibc}"',
+            'MACHINE_FLOOR_NAME="glibc"',
+            f'MACHINE_FLOOR="{glibc}"',
             f'PINNED_BORG_BINARIES="{binaries}"',
             f'install_borg_from_server "{major}" "{version}" {link}',
         ]
@@ -232,9 +232,11 @@ def _run_install_borg_from_server(
 
 _MANIFEST_TABLE = "\n".join(
     [
-        "1 x86_64 2.31 aa https://example.invalid/borg1-glibc231",
-        "1 x86_64 2.35 bb https://example.invalid/borg1-glibc235",
-        "2 x86_64 2.43 cc https://example.invalid/borg2-glibc243",
+        "1 linux x86_64 2.31 aa https://example.invalid/borg1-glibc231",
+        "1 linux x86_64 2.35 bb https://example.invalid/borg1-glibc235",
+        "2 linux x86_64 2.43 cc https://example.invalid/borg2-glibc243",
+        # A macOS row for the same major never reaches a Linux machine.
+        "2 darwin x86_64 15 dd https://example.invalid/borg2-macos",
     ]
 )
 
@@ -316,7 +318,7 @@ def test_agent_installer_explains_an_architecture_without_binaries(
         major="2",
         version="2.0.0b24",
         glibc="2.43",
-        binaries="2 aarch64 2.43 cc https://example.invalid/borg2-arm64",
+        binaries="2 linux aarch64 2.43 cc https://example.invalid/borg2-arm64",
     )
 
     assert result.returncode == 1
@@ -349,7 +351,7 @@ def test_agent_installer_forwarders_do_not_escalate(
 
     forwarder = response.text.split("write_forwarder() {", 1)[1].split("\n}", 1)[0]
     assert "sudo" not in forwarder
-    assert 'exec ${target} "\\$@"' in forwarder
+    assert 'exec "${target}" "\\$@"' in forwarder
 
 
 def test_agent_installer_installs_the_agent_from_the_enrolling_server(
@@ -604,7 +606,11 @@ def test_agent_installer_records_the_upgrade_parameters_as_root(
     # host (spec section 11.2).
     assert 'UPGRADE_CONF="/etc/borg-ui-agent-upgrade.conf"' in script
     assert "/etc/borg-ui-agent/upgrade.conf" not in script
-    assert "install -o root -g root -m 0644 " in script
+    assert (
+        'install -m 0644 /dev/null "${UPGRADE_CONF}"\n  own_root "${UPGRADE_CONF}"'
+        in (script)
+    )
+    assert "chown root:root" in script.split("own_root() {", 1)[1].split("\n}", 1)[0]
     for key in (
         "SERVER",
         "AGENT_ID",
@@ -667,7 +673,7 @@ def test_agent_installer_reinstall_prefers_the_root_owned_server(
     # wherever it named, nor have that server recorded for later upgrades.
     reinstall = script.split('if [[ "${REINSTALL}" == "1" ]]; then', 1)[1]
     from_conf = reinstall.index('sed -nE \'s/^SERVER="(.*)"$/\\1/p\' "${UPGRADE_CONF}"')
-    from_toml = reinstall.index("/etc/borg-ui-agent/config.toml | head -n 1")
+    from_toml = reinstall.index('"${CONFIG_DIR}/config.toml" | head -n 1')
     assert from_conf < from_toml
 
 
@@ -692,9 +698,10 @@ def test_agent_installer_helper_clears_its_own_trigger(test_client: TestClient):
     helper = script.split("<<'UPGRADE_HELPER'", 1)[1]
     body = helper.split('if [[ ! -r "${conf}" ]]', 1)[0]
     assert (
-        'rm -f "${BORG_UI_UPGRADE_TRIGGER:-/etc/borg-ui-agent/upgrade-requested}"'
-        in (body)
+        'trigger="${BORG_UI_UPGRADE_TRIGGER:-/etc/borg-ui-agent/upgrade-requested}"'
+        in body
     )
+    assert 'rm -f "${trigger}"' in (body)
 
 
 def test_agent_installer_takes_away_a_sudoers_rule_from_an_older_install(
@@ -725,3 +732,40 @@ def test_agent_installer_removes_the_upgrade_artifacts_when_declined(
     ):
         assert f'"${{{path}}}"' in removal
     assert "NO_REMOTE_UPGRADE_MARKER" in script
+
+
+def test_agent_installer_records_the_repository_in_the_service_environment(
+    test_client: TestClient,
+):
+    """The agent reports BORG_REPO and BORG_REMOTE_PATH to the server, which
+    pre-fills the repository form with them, so they live in the service's
+    environment and survive a reinstall through agent.env."""
+    script = test_client.get("/agent/install.sh").text
+
+    assert "--borg-repo URL" in script
+    assert "--borg-remote-path P" in script
+    assert "--no-prompt" in script
+    assert 'AGENT_ENV_FILE="${CONFIG_DIR}/agent.env"' in script
+    unit = script.split("cat >/etc/systemd/system/borg-ui-agent.service <<SERVICE", 1)[
+        1
+    ]
+    unit = unit.split("\nSERVICE\n", 1)[0]
+    # The unit is world-readable and a repository URL can carry a login, so
+    # the values stay in the 0600 file and the unit only points at it.
+    assert "EnvironmentFile=-/etc/borg-ui-agent/agent.env" in unit
+    assert "Environment=" not in unit
+    assert "validate_repository_values\n" in script
+    # A reinstall reads the recorded values back before rendering the unit,
+    # each one only when no flag gave it.
+    assert 'if [[ "${REINSTALL}" == "1" ]]; then\n  read_agent_env' in script
+    assert 'if [[ "${BORG_REPO_SET}" == "0" ]]; then' in script
+    assert 'if [[ "${BORG_REMOTE_PATH_SET}" == "0" ]]; then' in script
+    # Prompts only on a first install with a terminal; the upgrade helper's
+    # reinstall never sees one.
+    assert "{ exec 3<>/dev/tty; } 2>/dev/null || return 0" in script
+    # The SSH check is only requested there and made once the service user
+    # exists, so it runs as that user on Linux as well.
+    assert 'SSH_CHECK_REQUESTED="1"' in script
+    assert script.index("\n  resolve_service_identity\n") < script.index(
+        'if [[ "${SSH_CHECK_REQUESTED}" == "1" ]]; then\n  test_ssh_target'
+    )
