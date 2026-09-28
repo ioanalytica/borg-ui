@@ -577,6 +577,8 @@ def _installed_machine(tmp_path: Path, *, unit_user: str) -> dict[str, str]:
     state.mkdir(parents=True)
 
     return {
+        # A Linux inventory, wherever the test runs.
+        "BORG_UI_AGENT_PLATFORM": "Linux",
         "AGENT_ROOT": str(agent_root),
         "CONFIG_DIR": str(config_dir),
         "CONFIG_FILE": str(config_dir / "config.toml"),

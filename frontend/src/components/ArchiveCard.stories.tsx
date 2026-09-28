@@ -32,3 +32,6 @@ export const Openable: Story = { args: { onOpen: fn() } }
 
 /** Without an opener the row is inert; only its action icons do anything. */
 export const ActionsOnly: Story = {}
+
+/** An agent-executed repository cannot be mounted on the server, so the row offers no mount. */
+export const AgentRepository: Story = { args: { onOpen: fn(), mountHidden: true } }

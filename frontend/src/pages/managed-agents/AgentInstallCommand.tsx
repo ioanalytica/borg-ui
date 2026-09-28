@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import type { AgentMachineResponse } from '../../services/api'
 import {
   buildAgentInstallCommand,
+  type AgentPlatform,
   type AgentServiceUserMode,
   type BorgInstallMode,
 } from './agentInstallCommandText'
@@ -21,6 +22,7 @@ export default function AgentInstallCommand({
   agentName,
   borgInstallMode = 'borg1',
   serviceUserMode = 'current',
+  platform = 'linux',
   connectedAgent,
   onCopy,
 }: {
@@ -29,6 +31,7 @@ export default function AgentInstallCommand({
   agentName: string
   borgInstallMode?: BorgInstallMode
   serviceUserMode?: AgentServiceUserMode
+  platform?: AgentPlatform
   connectedAgent?: AgentMachineResponse | null
   onCopy: (value: string) => void
 }) {
@@ -38,7 +41,8 @@ export default function AgentInstallCommand({
     token,
     agentName,
     borgInstallMode,
-    serviceUserMode
+    serviceUserMode,
+    platform
   )
 
   return (
@@ -111,7 +115,9 @@ export default function AgentInstallCommand({
           color: 'text.secondary',
         }}
       >
-        {t('managedAgents.installCommand.description')}
+        {platform === 'macos'
+          ? t('managedAgents.installCommand.descriptionMacos')
+          : t('managedAgents.installCommand.description')}
       </Typography>
       <Box
         sx={{

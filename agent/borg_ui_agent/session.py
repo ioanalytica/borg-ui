@@ -5,6 +5,7 @@ import logging
 import os
 import queue
 import socket as socket_module
+import ssl
 import threading
 import time
 from collections.abc import Callable
@@ -47,10 +48,32 @@ KEEPALIVE_INTERVAL_SECONDS = 30.0
 OUTBOX_MAX_FRAMES = 1000
 
 
+def _ssl_options(url: str) -> Optional[dict]:
+    """A CA bundle for ``wss://`` where OpenSSL has no default store of its own.
+
+    Some Python builds ship without one, so the handshake would fail although
+    registration (``requests``, which brings certifi) succeeded. Where a store
+    exists nothing changes: a private CA trusted through it stays trusted.
+    """
+    if not url.startswith("wss://"):
+        return None
+    paths = ssl.get_default_verify_paths()
+    if (paths.cafile and os.path.isfile(paths.cafile)) or (
+        paths.capath and os.path.isdir(paths.capath)
+    ):
+        return None
+    import certifi
+
+    return {"ca_certs": certifi.where()}
+
+
 def _default_connect(url: str, *, header: list[str], timeout: int):
     from websocket import create_connection
 
-    return create_connection(url, header=header, timeout=timeout)
+    options = _ssl_options(url)
+    if options is None:
+        return create_connection(url, header=header, timeout=timeout)
+    return create_connection(url, header=header, timeout=timeout, sslopt=options)
 
 
 def _session_url(server_url: str) -> str:

@@ -15,6 +15,7 @@ from scripts.refresh_borg_binary_manifest import (
     _covers_both_arches,
     _coverage,
     _coverage_regressions,
+    _darwin_binaries,
     _linux_binaries,
 )
 
@@ -62,6 +63,36 @@ def test_assets_the_installer_cannot_use_are_ignored():
         )
         == []
     )
+
+
+def test_macos_assets_are_read_from_their_name():
+    """The macOS floor is the runner's major in the name, read the same way the
+    glibc digits are; the Linux reader still leaves them alone."""
+    release = _release(
+        "borg-macos-15-arm64-gh",
+        "borg-macos-15-x86_64-gh",
+        "borg-macos-15-arm64-gh.tgz",
+        "borg-linux-glibc243-x86_64-gh",
+    )
+
+    assert [
+        (entry["platform"], entry["arch"], entry["min_macos"])
+        for entry in _darwin_binaries(release)
+    ] == [("darwin", "aarch64", "15"), ("darwin", "x86_64", "15")]
+    assert [entry["platform"] for entry in _linux_binaries(release)] == ["linux"]
+
+
+def test_a_dropped_macos_pair_is_a_regression_not_a_stall():
+    """macOS coverage must not hold the Linux pin back, so a release without
+    it stays adoptable and the loss is shouted in the PR instead."""
+    old = [
+        {"platform": "linux", "arch": "x86_64", "min_glibc": "2.35"},
+        {"platform": "darwin", "arch": "aarch64", "min_macos": "15"},
+    ]
+    new = [{"platform": "linux", "arch": "x86_64", "min_glibc": "2.35"}]
+
+    assert _coverage_regressions(old, new) == ["drops darwin/aarch64 (was macOS 15)"]
+    assert _covers_both_arches(_release(*BOTH_ARCHES))
 
 
 def test_a_renamed_linux_pair_still_counts_as_adoptable():
