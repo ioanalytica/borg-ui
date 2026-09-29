@@ -1541,6 +1541,48 @@ def _uses_borg2_payload(data: Union[RepositoryCreate, RepositoryImport]) -> bool
     return requested_version == 2 or data.encryption in V2_ONLY_ENCRYPTION_MODES
 
 
+# Repository URLs only Borg 2 can open.
+BORG2_ONLY_URL_PREFIXES = (
+    "rest://",
+    "sftp://",
+    "http://",
+    "https://",
+    "s3:",
+    "b2:",
+    "rclone:",
+)
+
+
+def _reject_borg2_only_url_for_borg1(
+    path: Optional[str], *, borg2: bool, connection_id: Optional[int]
+) -> None:
+    """Refuse a repository URL only Borg 2 can open for a Borg 1 repository.
+
+    Borg 1 refuses none of them: it reads the ``scheme://`` forms as a local
+    directory and the ``name:`` forms as an ssh host of that name, so every job
+    on such a repository fails with an error that names something else. With
+    an SSH connection the path is a directory on that host and is left alone.
+    """
+    if borg2 or connection_id:
+        return
+    lowered = (path or "").strip().lower()
+    for prefix in BORG2_ONLY_URL_PREFIXES:
+        if not lowered.startswith(prefix):
+            continue
+        if prefix.endswith("//"):
+            detail = {
+                "key": "backend.errors.repo.borg2OnlyUrl",
+                "params": {"scheme": prefix},
+            }
+        else:
+            # The same text names an ssh host for Borg 1; say how to write one.
+            detail = {
+                "key": "backend.errors.repo.borg2OnlyUrlOrSshHost",
+                "params": {"scheme": prefix, "host": prefix[:-1]},
+            }
+        raise HTTPException(status_code=400, detail=detail)
+
+
 def _is_rclone_payload(data: Union[RepositoryCreate, RepositoryImport]) -> bool:
     return (getattr(data, "storage_backend", "local") or "local") == "rclone"
 
@@ -2567,6 +2609,12 @@ async def _create_agent_repository_record(
     *,
     imported: bool,
 ):
+    # Recorded below with the payload's major, whatever the encryption mode says.
+    _reject_borg2_only_url_for_borg1(
+        repo_data.path,
+        borg2=(repo_data.borg_version or 1) == 2,
+        connection_id=repo_data.connection_id,
+    )
     cloud_mirror_remote = _validate_cloud_mirror_payload(repo_data, db)
     await _preflight_cloud_mirror_path(repo_data, cloud_mirror_remote)
     agent = await _validate_agent_repository_payload(repo_data, db)
@@ -3494,6 +3542,11 @@ async def create_repository(
         _reject_unsupported_rclone_borg2(repo_data)
         if _is_rclone_payload(repo_data):
             return await _create_rclone_repository_record(repo_data, current_user, db)
+        _reject_borg2_only_url_for_borg1(
+            repo_data.path,
+            borg2=_uses_borg2_payload(repo_data),
+            connection_id=repo_data.connection_id,
+        )
         if _uses_borg2_payload(repo_data):
             _require_borg2_feature(db)
             if executor_type == "agent":
@@ -3901,6 +3954,11 @@ async def import_repository(
         _reject_unsupported_rclone_borg2(repo_data)
         if _is_rclone_payload(repo_data):
             return await _import_rclone_repository_record(repo_data, current_user, db)
+        _reject_borg2_only_url_for_borg1(
+            repo_data.path,
+            borg2=_uses_borg2_payload(repo_data),
+            connection_id=repo_data.connection_id,
+        )
         if _uses_borg2_payload(repo_data):
             _require_borg2_feature(db)
             if executor_type == "agent":
@@ -5131,6 +5189,13 @@ async def update_repository(
 
         if "path" in update_data and repo_data.path is not None:
             raw_path = repo_data.path.strip()
+            # The form sends the path with every edit; only a new one is checked.
+            if raw_path != repository.path:
+                _reject_borg2_only_url_for_borg1(
+                    raw_path,
+                    borg2=(repository.borg_version or 1) == 2,
+                    connection_id=target_connection_id,
+                )
 
         target_path = raw_path if raw_path is not None else repository.path
         if target_executor_type == "agent":
