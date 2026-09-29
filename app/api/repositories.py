@@ -63,6 +63,7 @@ from app.core.borg import BorgInterface
 from app.core.borg_router import BorgRouter
 from app.core.borg_errors import is_lock_error, is_repository_exists_failure
 from app.core.borg2 import (
+    BORG2_ENCRYPTION_MODES,
     ENCRYPTION_FLAGS_SINCE_BETA,
     borg2_speaks_encryption_flags,
     normalize_repo_info_encryption,
@@ -2922,13 +2923,14 @@ async def _create_direct_rclone_repository_record(
     repo_path = _validate_direct_rclone_payload(repo_data, db)
     _validate_repository_name_available(repo_data.name, db)
 
-    valid_encryption_modes = V2_ONLY_ENCRYPTION_MODES | {"none"}
-    if repo_data.encryption not in valid_encryption_modes:
+    # Borg 2 only: the modes repo-create is built from (no `none` since
+    # 2.0.0b25, and every mode has a key that wants a passphrase).
+    if repo_data.encryption not in BORG2_ENCRYPTION_MODES:
         raise HTTPException(
             status_code=400,
             detail={"key": "backend.errors.repo.invalidEncryptionMode"},
         )
-    if repo_data.encryption != "none" and not (repo_data.passphrase or "").strip():
+    if not (repo_data.passphrase or "").strip():
         raise HTTPException(
             status_code=400,
             detail={
@@ -5200,6 +5202,15 @@ async def update_repository(
 
                 # Reconstruct SSH URL
                 final_path = f"ssh://{connection_details['username']}@{connection_details['host']}:{connection_details['port']}/{path_to_use.lstrip('/')}"
+                if (repository.borg_version or 1) == 2:
+                    # Borg 2 tells a relative path from an absolute one by
+                    # the second slash, which the text above cannot carry.
+                    final_path = build_ssh_repository_path(
+                        raw_path if raw_path is not None else repository.path,
+                        connection_details,
+                        borg_version=2,
+                        stored_path=repository.path,
+                    )
 
                 # Check if path already exists (for a different repository)
                 existing_path = (
@@ -6326,7 +6337,10 @@ async def list_repository_archives(
         )
         router = BorgRouter(repository)
         cmd = router.build_repo_list_command(repository.path)
-        if remote_path := effective_repository_remote_path(repository):
+        # Borg 2 reads the remote Borg command from BORG_REMOTE_PATH, which
+        # the prepared environment carries; the option is Borg 1 only.
+        remote_path = effective_repository_remote_path(repository)
+        if remote_path and not router.is_v2:
             cmd.extend(["--remote-path", remote_path])
         # BorgRouter returns a Borg 2 command for a Borg 2 repository, and Borg 2
         # has no --bypass-lock (see app/core/borg2.py), so the flag goes on only
@@ -6435,7 +6449,10 @@ async def get_repository_info(
         )
         router = BorgRouter(repository)
         cmd = router.build_repo_info_command(repository.path)
-        if remote_path := effective_repository_remote_path(repository):
+        # Borg 2 reads the remote Borg command from BORG_REMOTE_PATH, which
+        # the prepared environment carries; the option is Borg 1 only.
+        remote_path = effective_repository_remote_path(repository)
+        if remote_path and not router.is_v2:
             cmd.extend(["--remote-path", remote_path])
         # BorgRouter returns a Borg 2 command for a Borg 2 repository, and Borg 2
         # has no --bypass-lock (see app/core/borg2.py), so the flag goes on only
@@ -6571,10 +6588,13 @@ async def get_repository_stats(
 
         router = BorgRouter(repository)
         cmd = router.build_repo_info_command(repository.path)
-        if bypass_lock:
-            cmd.append("--bypass-lock")
-        if remote_path := effective_repository_remote_path(repository):
-            cmd.extend(["--remote-path", remote_path])
+        # Both options are Borg 1 only: Borg 2 has no --bypass-lock and reads
+        # the remote Borg command from BORG_REMOTE_PATH (in the prepared env).
+        if not router.is_v2:
+            if bypass_lock:
+                cmd.append("--bypass-lock")
+            if remote_path := effective_repository_remote_path(repository):
+                cmd.extend(["--remote-path", remote_path])
         # machine-parsed: render timestamps in UTC (Borg 1 prints them naive)
         info_env = dict(env or {})
         info_env["TZ"] = "UTC"

@@ -5,6 +5,7 @@ import os
 import shlex
 from pathlib import Path
 from typing import Iterator, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import object_session
 
@@ -20,6 +21,38 @@ from app.utils.ssh_utils import (
     resolve_repository_ssh_connection,
     resolve_ssh_key_file_by_id,
 )
+
+
+def rsh_with_repository_port(rsh: str, repository_path: Optional[str]) -> str:
+    """The remote shell command with the port of an ssh:// repository URL.
+
+    Borg 2 hands a remote shell it was given (BORG_RSH) to the store as it
+    is and adds the URL's port only to the ssh command it builds itself, so
+    with BORG_RSH set `ssh://host:2222/path` connects to port 22. Borg 1
+    adds the port to either; the same port twice does no harm. A remote
+    shell that names a port keeps it.
+    """
+    if not rsh or not (repository_path or "").startswith("ssh://"):
+        return rsh
+    try:
+        port = urlsplit(repository_path).port
+        words = shlex.split(rsh)
+    except ValueError:
+        return rsh
+    if port is None or any(
+        word == "-p" or (word.startswith("-p") and word[2:].isdigit()) for word in words
+    ):
+        return rsh
+    return f"{rsh} -p {port}"
+
+
+def env_with_repository_port(env: dict, repository_path: Optional[str]) -> dict:
+    """`env` with the repository's port in the remote shell it names, in
+    place (BORG_RSH, and BORGSTORE_RSH where one is set)."""
+    for name in ("BORG_RSH", "BORGSTORE_RSH"):
+        if env.get(name):
+            env[name] = rsh_with_repository_port(env[name], repository_path)
+    return env
 
 
 def get_standard_ssh_opts(
@@ -209,6 +242,7 @@ def build_repository_borg_env(
     remote_path = effective_repository_remote_path(repository, db)
     if remote_path:
         env["BORG_REMOTE_PATH"] = remote_path
+    env_with_repository_port(env, getattr(repository, "path", None))
     return env, temp_key_file
 
 
@@ -244,6 +278,7 @@ def build_ssh_key_borg_env(
         lock_wait=lock_wait,
         show_progress=show_progress,
     )
+    env_with_repository_port(env, path)
     return env, temp_key_file
 
 

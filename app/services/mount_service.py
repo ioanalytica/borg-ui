@@ -30,6 +30,7 @@ from app.config import settings
 from app.core.borg_router import BorgRouter
 from app.utils.borg_env import (
     effective_repository_remote_path,
+    env_with_repository_port,
     get_standard_ssh_opts,
     REQUEST_LOCK_WAIT,
     with_lock_wait,
@@ -1128,11 +1129,15 @@ class MountService:
                 if archive_id and (repository.borg_version or 1) == 2:
                     archive_selector = f"aid:{archive_id}"
 
-                cmd = BorgRouter(repository).build_mount_command(
+                router = BorgRouter(repository)
+                remote_path = effective_repository_remote_path(repository, db)
+                env.update(router.remote_path_env(remote_path))
+                env_with_repository_port(env, repository.path)
+                cmd = router.build_mount_command(
                     repository_path=repository.path,
                     archive_name=archive_selector,
                     mount_point=mount_point,
-                    remote_path=effective_repository_remote_path(repository, db),
+                    remote_path=remote_path,
                     bypass_lock=repository.bypass_lock,
                 )
 

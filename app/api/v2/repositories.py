@@ -207,6 +207,7 @@ def _resolve_repository_target(
                 "port": conn.port,
                 "ssh_path_prefix": conn.ssh_path_prefix,
             },
+            borg_version=2,
         ),
         conn.ssh_key_id,
     )

@@ -697,6 +697,7 @@ class RestoreService:
                     ),
                     bypass_lock=repository.bypass_lock if repository else False,
                     strip_components=strip_components,
+                    destination=destination,
                 )
 
                 # Set up environment
@@ -1420,6 +1421,7 @@ class RestoreService:
                 ),
                 bypass_lock=repository.bypass_lock if repository else False,
                 strip_components=strip_components,
+                destination=mount_path,
             )
 
             # Set up environment

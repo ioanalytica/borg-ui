@@ -111,7 +111,7 @@ The agent reports the repository it backs up to, `BORG_REPO` (and
 `BORG_REMOTE_PATH`, the Borg executable on a host that offers several), from
 its environment, and Borg UI pre-fills the repository form with them. A
 first-time install run from a terminal therefore asks for both values, and for
-an `ssh://` or `rest://` repository offers to open one SSH connection as the
+an `ssh://` repository (`rest://` with a Borg 2 before 2.0.0b25) offers to open one SSH connection as the
 service user, so the host key and the login are confirmed while someone is
 there to answer; a service cannot do that later. Empty answers skip them.
 

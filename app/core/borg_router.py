@@ -234,7 +234,11 @@ class BorgRouter:
         remote_path: str = None,
         bypass_lock: bool = False,
         strip_components: Optional[int] = None,
+        destination: Optional[str] = None,
     ) -> List[str]:
+        """`destination`: the directory the command will run in, for Borg 2
+        (which refuses a directory that is not empty unless told otherwise);
+        Borg 1 has no use for it."""
         if self.is_v2:
             from app.services.v2.restore_service import restore_v2_service
 
@@ -245,6 +249,7 @@ class BorgRouter:
                 remote_path=remote_path,
                 bypass_lock=bypass_lock,
                 strip_components=strip_components,
+                destination=destination,
             )
 
         cmd = ["borg", "extract", "--progress", "--log-json", "--umask", "0022"]
@@ -259,6 +264,14 @@ class BorgRouter:
             cmd.extend(paths)
         return cmd
 
+    def remote_path_env(self, remote_path: Optional[str]) -> dict:
+        """What a caller that builds its own environment adds for the remote
+        Borg command. Borg 2 reads it from BORG_REMOTE_PATH only (the option
+        was removed in 2.0.0b22); Borg 1 gets it on the command line."""
+        if self.is_v2 and remote_path:
+            return {"BORG_REMOTE_PATH": remote_path}
+        return {}
+
     def build_break_lock_command(
         self, repository_path: str, remote_path: str = None
     ) -> List[str]:
@@ -266,10 +279,11 @@ class BorgRouter:
         if self.is_v2:
             from app.core.borg2 import borg2
 
-            cmd = [borg2.borg_cmd, "-r", repository_path, "break-lock"]
-            if remote_path:
-                cmd.extend(["--remote-path", remote_path])
-            return cmd
+            from app.core.borg2 import ensure_borg2_repository_url
+
+            ensure_borg2_repository_url(repository_path, borg2.borg_cmd)
+            # no --remote-path on Borg 2: see `remote_path_env`
+            return [borg2.borg_cmd, "-r", repository_path, "break-lock"]
 
         cmd = ["borg", "break-lock"]
         if remote_path:
@@ -290,8 +304,6 @@ class BorgRouter:
             if dry_run:
                 cmd.append("--dry-run")
             cmd.extend(["-a", "sh:*"])
-            if remote_path := effective_repository_remote_path(self.repo):
-                cmd.extend(["--remote-path", remote_path])
             return cmd
 
         from app.core.borg import borg
@@ -311,10 +323,7 @@ class BorgRouter:
         if self.is_v2:
             from app.core.borg2 import borg2
 
-            cmd = [borg2.borg_cmd, "-r", self.repo.path, "compact"]
-            if remote_path := effective_repository_remote_path(self.repo):
-                cmd.extend(["--remote-path", remote_path])
-            return cmd
+            return [borg2.borg_cmd, "-r", self.repo.path, "compact"]
 
         from app.core.borg import borg
 

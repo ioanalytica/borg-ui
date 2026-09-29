@@ -31,6 +31,7 @@ from app.services.repository_executor import (
     wait_for_agent_repository_operation_job,
 )
 from app.services.rclone_service import RcloneService, rclone_service
+from app.utils.repository_paths import ssh_repository_directory
 from app.utils.schedule_time import (
     DEFAULT_SCHEDULE_TIMEZONE,
     calculate_next_cron_run,
@@ -285,6 +286,9 @@ class RcloneRepositoryService:
         if not source:
             raise ValueError("SSH repository path is required for cloud mirror")
         if source.startswith("ssh://"):
+            if (repository.borg_version or 1) == 2:
+                # a relative Borg 2 URL names no directory to mount
+                return ssh_repository_directory(source, borg_version=2)
             parsed = urlparse(source)
             return parsed.path or "/"
         return source
