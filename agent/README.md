@@ -367,6 +367,10 @@ The first implementation supports:
   the user's Application Support directory, a Homebrew or MacPorts Borg
   reports its install source, and the self-upgrade readiness reads the
   launchd job instead of the systemd units
+- from 0.1.16 the self-upgrade readiness compares the server in the upgrade
+  record with the one the agent is enrolled against and reports no
+  `self_upgrade` capability when they differ, which is what `set-server`
+  leaves behind; `set-server` names the reinstall that brings it back
 - cancellation through heartbeat; from 0.1.7 (`jobs.cancel`) a running
   backup, check, prune, compact, restore or archive delete stops as well,
   even while Borg prints nothing
