@@ -1,39 +1,21 @@
 {
-  "generatedAt": "2026-10-01T19:06:29.813Z",
+  "generatedAt": "2026-10-01T19:18:45.000Z",
   "reportUrl": "",
   "metadata": {
     "title": "PR #123 visual report",
     "commitSha": "0151aecf8c0c",
-    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/36911566628"
+    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/36913156586"
   },
   "totals": {
     "baseline": 1134,
     "actual": 1134,
     "compared": 1134,
-    "changed": 3,
+    "changed": 2,
     "added": 0,
     "removed": 0,
-    "unchanged": 1131
+    "unchanged": 1132
   },
   "changed": [
-    {
-      "fileName": "quick-start-steps--destination-ssh-no-default-path.png",
-      "baselinePath": "images/baseline/quick-start-steps--destination-ssh-no-default-path.png",
-      "actualPath": "images/actual/quick-start-steps--destination-ssh-no-default-path.png",
-      "diffPath": "images/diff/quick-start-steps--destination-ssh-no-default-path.png",
-      "diffPixels": 2785,
-      "totalPixels": 1024000,
-      "diffRatio": 0.0027197265625,
-      "dimensionsChanged": false,
-      "baseline": {
-        "width": 1280,
-        "height": 800
-      },
-      "actual": {
-        "width": 1280,
-        "height": 800
-      }
-    },
     {
       "fileName": "quick-start-steps--folders-immich-found.png",
       "baselinePath": "images/baseline/quick-start-steps--folders-immich-found.png",
@@ -3214,6 +3196,9 @@
     },
     {
       "fileName": "quick-start-steps--destination-ssh-no-default-path--mobile.png"
+    },
+    {
+      "fileName": "quick-start-steps--destination-ssh-no-default-path.png"
     },
     {
       "fileName": "quick-start-steps--destination-ssh.png"
