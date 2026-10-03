@@ -1,29 +1,47 @@
 {
-  "generatedAt": "2026-10-01T19:18:45.000Z",
+  "generatedAt": "2026-10-03T04:24:35.248Z",
   "reportUrl": "",
   "metadata": {
     "title": "PR #123 visual report",
-    "commitSha": "0151aecf8c0c",
-    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/36913156586"
+    "commitSha": "0a0bb34959b7",
+    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/37095504155"
   },
   "totals": {
     "baseline": 1134,
     "actual": 1134,
     "compared": 1134,
-    "changed": 2,
+    "changed": 4,
     "added": 0,
     "removed": 0,
-    "unchanged": 1132
+    "unchanged": 1130
   },
   "changed": [
     {
-      "fileName": "quick-start-steps--folders-immich-found.png",
-      "baselinePath": "images/baseline/quick-start-steps--folders-immich-found.png",
-      "actualPath": "images/actual/quick-start-steps--folders-immich-found.png",
-      "diffPath": "images/diff/quick-start-steps--folders-immich-found.png",
-      "diffPixels": 53595,
+      "fileName": "quick-start-steps--folders-immich-no-permission--mobile.png",
+      "baselinePath": "images/baseline/quick-start-steps--folders-immich-no-permission--mobile.png",
+      "actualPath": "images/actual/quick-start-steps--folders-immich-no-permission--mobile.png",
+      "diffPath": "images/diff/quick-start-steps--folders-immich-no-permission--mobile.png",
+      "diffPixels": 72682,
+      "totalPixels": 329160,
+      "diffRatio": 0.2208105480617329,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 390,
+        "height": 844
+      },
+      "actual": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "fileName": "quick-start-steps--folders-immich-no-permission.png",
+      "baselinePath": "images/baseline/quick-start-steps--folders-immich-no-permission.png",
+      "actualPath": "images/actual/quick-start-steps--folders-immich-no-permission.png",
+      "diffPath": "images/diff/quick-start-steps--folders-immich-no-permission.png",
+      "diffPixels": 8260,
       "totalPixels": 1024000,
-      "diffRatio": 0.0523388671875,
+      "diffRatio": 0.00806640625,
       "dimensionsChanged": false,
       "baseline": {
         "width": 1280,
@@ -35,13 +53,13 @@
       }
     },
     {
-      "fileName": "quick-start-steps--folders-immich-no-permission--mobile.png",
-      "baselinePath": "images/baseline/quick-start-steps--folders-immich-no-permission--mobile.png",
-      "actualPath": "images/actual/quick-start-steps--folders-immich-no-permission--mobile.png",
-      "diffPath": "images/diff/quick-start-steps--folders-immich-no-permission--mobile.png",
-      "diffPixels": 62052,
+      "fileName": "quick-start-steps--folders-picked--mobile.png",
+      "baselinePath": "images/baseline/quick-start-steps--folders-picked--mobile.png",
+      "actualPath": "images/actual/quick-start-steps--folders-picked--mobile.png",
+      "diffPath": "images/diff/quick-start-steps--folders-picked--mobile.png",
+      "diffPixels": 23293,
       "totalPixels": 329160,
-      "diffRatio": 0.1885162231133795,
+      "diffRatio": 0.07076497751853202,
       "dimensionsChanged": false,
       "baseline": {
         "width": 390,
@@ -50,6 +68,24 @@
       "actual": {
         "width": 390,
         "height": 844
+      }
+    },
+    {
+      "fileName": "quick-start-steps--folders-picked.png",
+      "baselinePath": "images/baseline/quick-start-steps--folders-picked.png",
+      "actualPath": "images/actual/quick-start-steps--folders-picked.png",
+      "diffPath": "images/diff/quick-start-steps--folders-picked.png",
+      "diffPixels": 16590,
+      "totalPixels": 1024000,
+      "diffRatio": 0.016201171875,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 1280,
+        "height": 800
+      },
+      "actual": {
+        "width": 1280,
+        "height": 800
       }
     }
   ],
@@ -3216,7 +3252,7 @@
       "fileName": "quick-start-steps--folders-immich-found--mobile.png"
     },
     {
-      "fileName": "quick-start-steps--folders-immich-no-permission.png"
+      "fileName": "quick-start-steps--folders-immich-found.png"
     },
     {
       "fileName": "quick-start-steps--folders-immich-not-found--mobile.png"
@@ -3229,12 +3265,6 @@
     },
     {
       "fileName": "quick-start-steps--folders-immich-not-readable.png"
-    },
-    {
-      "fileName": "quick-start-steps--folders-picked--mobile.png"
-    },
-    {
-      "fileName": "quick-start-steps--folders-picked.png"
     },
     {
       "fileName": "quick-start-steps--protect--mobile.png"
