@@ -1,19 +1,19 @@
 {
-  "generatedAt": "2026-10-08T09:58:33.461Z",
+  "generatedAt": "2026-10-08T11:00:05.635Z",
   "reportUrl": "",
   "metadata": {
     "title": "PR #141 visual report",
     "commitSha": "196a74aaf745",
-    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/37760151311"
+    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/37767034148"
   },
   "totals": {
     "baseline": 1194,
     "actual": 1202,
     "compared": 1194,
-    "changed": 2,
+    "changed": 3,
     "added": 8,
     "removed": 0,
-    "unchanged": 1192
+    "unchanged": 1191
   },
   "changed": [
     {
@@ -35,13 +35,31 @@
       }
     },
     {
+      "fileName": "components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png",
+      "baselinePath": "images/baseline/components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png",
+      "actualPath": "images/actual/components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png",
+      "diffPath": "images/diff/components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png",
+      "diffPixels": 362,
+      "totalPixels": 329160,
+      "diffRatio": 0.0010997691092477823,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 390,
+        "height": 844
+      },
+      "actual": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
       "fileName": "pages-cloudstorage--editing-remote--mobile.png",
       "baselinePath": "images/baseline/pages-cloudstorage--editing-remote--mobile.png",
       "actualPath": "images/actual/pages-cloudstorage--editing-remote--mobile.png",
       "diffPath": "images/diff/pages-cloudstorage--editing-remote--mobile.png",
-      "diffPixels": 2077,
+      "diffPixels": 362,
       "totalPixels": 329160,
-      "diffRatio": 0.006310001215214485,
+      "diffRatio": 0.0010997691092477823,
       "dimensionsChanged": false,
       "baseline": {
         "width": 390,
@@ -2533,9 +2551,6 @@
     },
     {
       "fileName": "components-wizard-rclone-remote-dialog--create-managed-remote.png"
-    },
-    {
-      "fileName": "components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png"
     },
     {
       "fileName": "components-wizard-rclone-remote-dialog--custom-backend-remote.png"
