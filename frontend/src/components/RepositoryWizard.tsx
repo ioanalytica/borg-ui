@@ -1427,6 +1427,7 @@ const RepositoryWizard = ({
               historyIndexExcludes: wizardState.historyIndexExcludes,
             }}
             onChange={handleStateChange}
+            agentRepository={wizardState.executionTarget === 'agent'}
           />
         )
 
