@@ -2159,3 +2159,362 @@ def test_apply_listing_takes_the_added_size_of_a_backup_without_archive_id(db, r
     )
 
     assert db.query(Archive).one().deduplicated_size == 708
+
+
+POST_HOOKS_FAILED = json.dumps(
+    {
+        "key": "backend.errors.service.postBackupHooksFailed",
+        "params": {"failed": 1, "total": 1},
+    }
+)
+
+
+def _seed_backup(
+    db, repo, *, status, archive_name="daily", day=2, started_at=None, **extra
+):
+    from tests.utils.operations import seed_job_operation
+
+    started_at = started_at or datetime(2026, 9, day, 2, 0, 0)
+    return seed_job_operation(
+        db,
+        "backup",
+        repository=repo.path,
+        status=status,
+        started_at=started_at,
+        completed_at=started_at + timedelta(minutes=5),
+        archive_name=archive_name,
+        **extra,
+    )
+
+
+@pytest.mark.unit
+def test_apply_listing_links_the_archive_of_a_backup_whose_post_hook_failed(db, repo):
+    """#1328: `borg create` succeeded and a post-backup hook failed. The
+    archive exists although the backup ended failed, so it is linked to it
+    (Borg 1: no archive id, matched by name)."""
+    backup = _seed_backup(
+        db,
+        repo,
+        status="failed",
+        archive_name="nas-2026-09-02T02:00:00",
+        error_message=POST_HOOKS_FAILED,
+    )
+
+    index_exec.apply_listing(db, repo, [BORG1_ENTRY], timezone_name="UTC")
+
+    assert db.query(Archive).one().backup_operation_id == backup.id
+
+
+@pytest.mark.unit
+def test_apply_listing_links_a_failed_backup_by_the_archive_id_it_recorded(db, repo):
+    """#1328: a Borg 2 backup that recorded the id `create --json` reported
+    made that archive, whatever failed after it."""
+    repo.borg_version = 2
+    db.commit()
+    backup = _seed_backup(
+        db,
+        repo,
+        status="failed",
+        archive_id="bb22",
+        error_message="stats refresh failed",
+    )
+
+    index_exec.apply_listing(
+        db,
+        repo,
+        [{"id": "bb22", "name": "daily", "time": "2026-09-02T02:00:09"}],
+        timezone_name="UTC",
+    )
+
+    assert db.query(Archive).one().backup_operation_id == backup.id
+
+
+@pytest.mark.unit
+def test_apply_listing_never_links_a_backup_whose_create_failed(db, repo):
+    """A Borg 2 series repeats the name of a backup whose `borg create`
+    failed and wrote nothing; the archive belongs to the completed one."""
+    repo.borg_version = 2
+    db.commit()
+    completed = _seed_backup(
+        db, repo, status="completed", started_at=datetime(2026, 9, 2, 1, 58, 0)
+    )
+    _seed_backup(db, repo, status="failed", error_message="borg create failed")
+
+    index_exec.apply_listing(
+        db,
+        repo,
+        # nearer the failed backup's start than the completed one's
+        [{"id": "aa11", "name": "daily", "time": "2026-09-02T02:00:09"}],
+        timezone_name="UTC",
+    )
+
+    assert db.query(Archive).one().backup_operation_id == completed.id
+
+
+@pytest.mark.unit
+def test_apply_listing_links_an_archive_listed_before_its_backup_ended(db, repo):
+    """#1328: a row stored while its backup still ran (or before this link
+    existed) is linked by a later listing."""
+    repo.borg_version = 2
+    db.commit()
+    index_exec.apply_listing(
+        db,
+        repo,
+        [{"id": "bb22", "name": "daily", "time": "2026-09-02T02:00:09"}],
+        timezone_name="UTC",
+    )
+    assert db.query(Archive).one().backup_operation_id is None
+    backup = _seed_backup(
+        db,
+        repo,
+        status="failed",
+        archive_id="bb22",
+        error_message=POST_HOOKS_FAILED,
+    )
+
+    index_exec.apply_listing(
+        db,
+        repo,
+        [{"id": "bb22", "name": "daily", "time": "2026-09-02T02:00:09"}],
+        timezone_name="UTC",
+    )
+
+    assert db.query(Archive).one().backup_operation_id == backup.id
+
+
+@pytest.mark.unit
+def test_apply_listing_links_by_archive_id_before_name_and_start(db, repo):
+    """A backup that recorded an archive id made that archive and no other,
+    however near another archive of the series started."""
+    repo.borg_version = 2
+    db.commit()
+    first = _seed_backup(db, repo, status="completed", archive_id="aa11", day=1)
+    second = _seed_backup(db, repo, status="completed", archive_id="bb22", day=2)
+    without_id = _seed_backup(db, repo, status="completed", day=3)
+
+    index_exec.apply_listing(
+        db,
+        repo,
+        [
+            # each started nearest another backup than its own
+            {"id": "bb22", "name": "daily", "time": "2026-09-01T02:00:09"},
+            {"id": "aa11", "name": "daily", "time": "2026-09-02T02:00:09"},
+            {"id": "cc33", "name": "daily", "time": "2026-09-03T02:00:10"},
+        ],
+        timezone_name="UTC",
+    )
+
+    by_id = {a.borg_id: a.backup_operation_id for a in db.query(Archive).all()}
+    assert by_id == {"aa11": first.id, "bb22": second.id, "cc33": without_id.id}
+
+
+@pytest.mark.unit
+def test_apply_listing_links_more_unlinked_rows_than_one_query_chunk(db, repo):
+    from app.services.operations.backup_facade import IN_CHUNK
+
+    count = IN_CHUNK + 3
+    backups = [
+        _seed_backup(db, repo, status="completed", archive_name=f"nas-{n}")
+        for n in range(count)
+    ]
+
+    index_exec.apply_listing(
+        db,
+        repo,
+        [
+            {"id": f"id{n}", "name": f"nas-{n}", "start": "2026-09-02T02:00:09"}
+            for n in range(count)
+        ],
+        timezone_name="UTC",
+    )
+
+    by_name = {a.name: a.backup_operation_id for a in db.query(Archive).all()}
+    assert by_name == {f"nas-{n}": backups[n].id for n in range(count)}
+
+
+@pytest.mark.unit
+def test_apply_listing_links_a_long_series_to_the_runs_that_made_it(db, repo):
+    """Every archive of a long Borg 2 series is matched within the runs
+    around its start, not against every backup of the series."""
+    repo.borg_version = 2
+    db.commit()
+    first = datetime(2026, 9, 1, 0, 0, 0)
+    count = 600
+    backups = [
+        _seed_backup(
+            db, repo, status="completed", started_at=first + timedelta(hours=n)
+        )
+        for n in range(count)
+    ]
+    entries = [
+        {
+            "id": f"id{n}",
+            "name": "daily",
+            "time": (first + timedelta(hours=n, seconds=9)).isoformat(),
+        }
+        for n in reversed(range(count))
+    ]
+
+    index_exec.apply_listing(db, repo, entries, timezone_name="UTC")
+
+    by_id = {a.borg_id: a.backup_operation_id for a in db.query(Archive).all()}
+    assert by_id == {f"id{n}": backups[n].id for n in range(count)}
+
+
+@pytest.mark.unit
+def test_apply_listing_never_gives_an_older_unlinked_archive_a_newer_backup(db, repo):
+    """An older archive of the series that no backup made (imported, or
+    from before the backup history) stays unlinked; the backup goes to the
+    archive it made, wherever the listing puts it."""
+    repo.borg_version = 2
+    db.commit()
+    index_exec.apply_listing(
+        db,
+        repo,
+        [{"id": "aa11", "name": "daily", "time": "2026-09-01T02:00:09"}],
+        timezone_name="UTC",
+    )
+    backup = _seed_backup(db, repo, status="completed", day=2)
+
+    index_exec.apply_listing(
+        db,
+        repo,
+        [
+            {"id": "aa11", "name": "daily", "time": "2026-09-01T02:00:09"},
+            {"id": "bb22", "name": "daily", "time": "2026-09-02T02:00:09"},
+        ],
+        timezone_name="UTC",
+    )
+
+    by_id = {a.borg_id: a.backup_operation_id for a in db.query(Archive).all()}
+    assert by_id == {"aa11": None, "bb22": backup.id}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "error_message",
+    ['{"key": []}', '{"key": {}}', "[1]", "not json", None],
+)
+def test_apply_listing_skips_a_failed_backup_with_another_error(
+    db, repo, error_message
+):
+    _seed_backup(
+        db,
+        repo,
+        status="failed",
+        archive_name="nas-2026-09-02T02:00:00",
+        error_message=error_message,
+    )
+
+    index_exec.apply_listing(db, repo, [BORG1_ENTRY], timezone_name="UTC")
+
+    assert db.query(Archive).one().backup_operation_id is None
+
+
+@pytest.mark.unit
+def test_apply_listing_never_moves_a_deleted_archives_backup_to_another(db, repo):
+    """The backup of a deleted archive is unclaimed again; an archive of the
+    series that started outside its run never takes it."""
+    repo.borg_version = 2
+    db.commit()
+    index_exec.apply_listing(
+        db,
+        repo,
+        [{"id": "aa11", "name": "daily", "time": "2026-09-01T02:00:09"}],
+        timezone_name="UTC",
+    )
+    backup = _seed_backup(db, repo, status="completed", day=2)
+    both = [
+        {"id": "aa11", "name": "daily", "time": "2026-09-01T02:00:09"},
+        {"id": "bb22", "name": "daily", "time": "2026-09-02T02:00:09"},
+    ]
+    index_exec.apply_listing(db, repo, both, timezone_name="UTC")
+    db.query(Archive).filter(Archive.borg_id == "bb22").delete()
+    db.commit()
+
+    index_exec.apply_listing(db, repo, both[:1], timezone_name="UTC")
+    index_exec.apply_listing(db, repo, both[:1], timezone_name="UTC")
+
+    assert db.query(Archive).one().backup_operation_id is None
+    assert db.get(Operation, backup.id) is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("time", "linked"),
+    [
+        # the server's and the agent's clocks differ a little
+        ("2026-09-02T01:56:00", True),
+        ("2026-09-02T02:09:00", True),
+        # no run of a backup of that name holds it
+        ("2026-09-02T01:54:00", False),
+        ("2026-09-02T02:11:00", False),
+    ],
+)
+def test_apply_listing_matches_by_name_only_within_the_backups_run(
+    db, repo, time, linked
+):
+    repo.borg_version = 2
+    db.commit()
+    backup = _seed_backup(db, repo, status="completed", day=2)
+
+    index_exec.apply_listing(
+        db,
+        repo,
+        [{"id": "bb22", "name": "daily", "time": time}],
+        timezone_name="UTC",
+    )
+
+    expected = backup.id if linked else None
+    assert db.query(Archive).one().backup_operation_id == expected
+
+
+@pytest.mark.unit
+def test_apply_listing_links_a_borg1_archive_dated_before_its_backup(db, repo):
+    """`--timestamp` may date a Borg 1 archive before the run; its name is
+    unique in the repository, so the name alone matches it."""
+    backup = _seed_backup(
+        db, repo, status="completed", archive_name="nas-2026-09-02T02:00:00"
+    )
+
+    index_exec.apply_listing(
+        db,
+        repo,
+        [
+            {
+                **BORG1_ENTRY,
+                "start": "2026-08-30T02:00:00",
+                "time": "2026-08-30T02:00:00",
+            }
+        ],
+        timezone_name="UTC",
+    )
+
+    assert db.query(Archive).one().backup_operation_id == backup.id
+
+
+@pytest.mark.unit
+def test_apply_listing_links_an_archive_to_the_run_it_started_in(db, repo):
+    """A pre-backup hook delays the archive to the end of its run, nearer
+    the next backup's start; it still belongs to the run it started in."""
+    repo.borg_version = 2
+    db.commit()
+    first = _seed_backup(
+        db, repo, status="completed", started_at=datetime(2026, 9, 2, 2, 0, 0)
+    )
+    second = _seed_backup(
+        db, repo, status="completed", started_at=datetime(2026, 9, 2, 2, 6, 0)
+    )
+
+    index_exec.apply_listing(
+        db,
+        repo,
+        [
+            {"id": "bb22", "name": "daily", "time": "2026-09-02T02:10:30"},
+            {"id": "aa11", "name": "daily", "time": "2026-09-02T02:04:30"},
+        ],
+        timezone_name="UTC",
+    )
+
+    by_id = {a.borg_id: a.backup_operation_id for a in db.query(Archive).all()}
+    assert by_id == {"aa11": first.id, "bb22": second.id}

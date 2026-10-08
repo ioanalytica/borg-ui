@@ -23,7 +23,8 @@ Translations, all in one place:
 
 import asyncio
 import json
-from datetime import datetime
+from bisect import bisect_right
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -748,34 +749,152 @@ def _nearest_start(rows, anchor):
     return min(rows, key=lambda r: (abs(r.start - anchor), -r.id))
 
 
-def link_archive_to_backup(db: Session, archive: Archive) -> None:
-    """Record which backup made a newly listed archive (spec 6.4).
+def failed_after_create(status: Optional[str], error_message: Optional[str]) -> bool:
+    """Whether a backup ended failed although its `borg create` succeeded,
+    which only a post-backup hook failure reports (POST_CREATE_FAILURE_KEYS)."""
+    if status != "failed":
+        return False
+    try:
+        parsed = json.loads(error_message or "")
+    except (TypeError, ValueError):
+        return False
+    key = parsed.get("key") if isinstance(parsed, dict) else None
+    return isinstance(key, str) and key in POST_CREATE_FAILURE_KEYS
 
-    Borg reports no operation id, so the match is by name: the completed
-    backup in the repository with that archive name that no stored archive
-    claims yet, nearest in start time when a Borg 2 series repeats the name.
+
+# How far a Borg 2 archive's start may lie outside the run of the backup it
+# is matched to by name: the server's and the agent's clocks differ a little.
+LINK_CLOCK_SKEW = timedelta(minutes=5)
+ZERO = timedelta(0)
+
+
+def link_archives_to_backups(
+    db: Session, repository_id: int, archives: list[Archive], *, borg2: bool
+) -> None:
+    """Record which backup made each listed archive that has none (spec 6.4).
+
+    A backup that recorded the id `borg create --json` reported made that
+    archive, whatever its final status. Borg reports no operation id
+    otherwise, so a backup without one is matched by name: a backup whose
+    `borg create` succeeded, with that archive name, the one during whose
+    run the archive started first, then the nearest start. A Borg 2 series repeats the name, so there the archive must also
+    have started during the backup's run (LINK_CLOCK_SKEW either side): an
+    archive of the series that no backup made, or the backup of a deleted
+    one, is not matched to the next one of the name. A Borg 1 name is unique
+    in its repository, and `--timestamp` may date the archive before the
+    run. A backup no stored archive claims yet, and one claim each. Rows stored before their backup ended
+    are linked by a later listing, so the backups are read for the unlinked
+    rows in chunks rather than once per row.
     """
-    claimed = db.query(Archive.backup_operation_id).filter(
-        Archive.repository_id == archive.repository_id,
-        Archive.backup_operation_id.isnot(None),
-    )
-    candidates = (
-        db.query(Operation.id, Operation.started_at.label("start"))
+    unlinked = [a for a in archives if a.backup_operation_id is None]
+    if not unlinked:
+        return
+    claimed = {
+        operation_id
+        for (operation_id,) in db.query(Archive.backup_operation_id).filter(
+            Archive.repository_id == repository_id,
+            Archive.backup_operation_id.isnot(None),
+        )
+    }
+    query = (
+        db.query(
+            Operation.id,
+            Operation.started_at.label("start"),
+            Operation.completed_at,
+            Operation.status,
+            Operation.error_message,
+            OperationBackupDetails.archive_name,
+            OperationBackupDetails.archive_id,
+        )
         .join(
             OperationBackupDetails, OperationBackupDetails.operation_id == Operation.id
         )
         .filter(
-            Operation.repository_id == archive.repository_id,
+            Operation.repository_id == repository_id,
             Operation.kind == "backup",
-            Operation.status.in_(("completed", "completed_with_warnings")),
-            Operation.started_at.isnot(None),
-            OperationBackupDetails.archive_name == archive.name,
-            Operation.id.notin_(claimed),
         )
-        .all()
     )
-    if candidates:
-        archive.backup_operation_id = _nearest_start(candidates, archive.start).id
+    by_id: dict = {}
+    by_name: dict = {}
+    for column, values in (
+        (OperationBackupDetails.archive_id, sorted({a.borg_id for a in unlinked})),
+        (OperationBackupDetails.archive_name, sorted({a.name for a in unlinked})),
+    ):
+        for start in range(0, len(values), IN_CHUNK):
+            for row in query.filter(column.in_(values[start : start + IN_CHUNK])):
+                if row.id in claimed:
+                    continue
+                if row.archive_id:
+                    # it made the archive it recorded, and no other
+                    by_id.setdefault(row.archive_id, row)
+                elif row.start is not None and (
+                    row.status in ("completed", "completed_with_warnings")
+                    or failed_after_create(row.status, row.error_message)
+                ):
+                    by_name.setdefault(row.archive_name, {})[row.id] = row
+    for archive in unlinked:
+        row = by_id.get(archive.borg_id)
+        if row is not None and row.id not in claimed:
+            archive.backup_operation_id = row.id
+            claimed.add(row.id)
+
+    runs = {}
+    for name, rows in by_name.items():
+        rows = sorted(rows.values(), key=lambda r: (r.start, r.id))
+        ends = [max(r.completed_at or r.start, r.start) for r in rows]
+        runs[name] = (
+            rows,
+            [r.start for r in rows],
+            ends,
+            max(end - r.start for r, end in zip(rows, ends)),
+        )
+    pairs = []
+    for position, archive in enumerate(unlinked):
+        if archive.backup_operation_id is not None:
+            continue
+        found = runs.get(archive.name)
+        if found is None:
+            continue
+        rows, starts, ends, longest = found
+        if borg2:
+            # Only runs that began by the archive's start can hold it, and
+            # none that began before its start minus the longest run.
+            index = bisect_right(starts, archive.start + LINK_CLOCK_SKEW)
+            first = index
+            while first > 0 and (
+                starts[first - 1] >= archive.start - LINK_CLOCK_SKEW - longest
+            ):
+                first -= 1
+            matching = [
+                i
+                for i in range(first, index)
+                if ends[i] + LINK_CLOCK_SKEW >= archive.start
+            ]
+        else:
+            matching = range(len(rows))
+        pairs.extend(
+            (
+                (
+                    # how far the archive started outside the run: a backup
+                    # creates its archive during its run, and the runs of one
+                    # repository do not overlap
+                    max(starts[i] - archive.start, archive.start - ends[i], ZERO),
+                    abs(starts[i] - archive.start),
+                    -rows[i].id,
+                    position,
+                ),
+                archive,
+                rows[i],
+            )
+            for i in matching
+        )
+    # Nearest pair first, not listing order: of two archives one backup
+    # could have made, the one it made takes it.
+    pairs.sort(key=lambda pair: pair[0])
+    for _, archive, row in pairs:
+        if archive.backup_operation_id is None and row.id not in claimed:
+            archive.backup_operation_id = row.id
+            claimed.add(row.id)
 
 
 def take_added_sizes(db: Session, archives: list[Archive]) -> None:
@@ -809,8 +928,8 @@ def take_added_sizes(db: Session, archives: list[Archive]) -> None:
 def archive_borg_id_for(db: Session, job: "BackupJobFacade") -> Optional[str]:
     """The stored archive's borg id for a backup, or None if none is stored.
 
-    The sync links each new archive to its backup; rows stored before that
-    link existed fall back to the same-name row nearest the job's start.
+    The sync links each listed archive to its backup; rows it cannot link
+    fall back to the same-name row nearest the job's start.
     `Archive.name` is the full name for both Borg versions.
     """
     return archive_borg_ids_for(db, [job])[job.id]
