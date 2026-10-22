@@ -1,19 +1,19 @@
 {
-  "generatedAt": "2026-10-21T17:47:58.554Z",
+  "generatedAt": "2026-10-22T17:04:22.402Z",
   "reportUrl": "",
   "metadata": {
     "title": "PR #149 visual report",
-    "commitSha": "4a47e6d80ef6",
-    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/39646771283"
+    "commitSha": "7f10c712e05b",
+    "runUrl": "https://github.com/ioanalytica/borg-ui/actions/runs/39819064726"
   },
   "totals": {
     "baseline": 1214,
     "actual": 1214,
     "compared": 1214,
-    "changed": 5,
+    "changed": 11,
     "added": 0,
     "removed": 0,
-    "unchanged": 1209
+    "unchanged": 1203
   },
   "changed": [
     {
@@ -35,10 +35,118 @@
       }
     },
     {
-      "fileName": "components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png",
-      "baselinePath": "images/baseline/components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png",
-      "actualPath": "images/actual/components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png",
-      "diffPath": "images/diff/components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png",
+      "fileName": "components-planinfodrawer--community-upgrade-drawer--mobile.png",
+      "baselinePath": "images/baseline/components-planinfodrawer--community-upgrade-drawer--mobile.png",
+      "actualPath": "images/actual/components-planinfodrawer--community-upgrade-drawer--mobile.png",
+      "diffPath": "images/diff/components-planinfodrawer--community-upgrade-drawer--mobile.png",
+      "diffPixels": 6716,
+      "totalPixels": 329160,
+      "diffRatio": 0.020403451209138414,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 390,
+        "height": 844
+      },
+      "actual": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "fileName": "components-planinfodrawer--community-upgrade-drawer.png",
+      "baselinePath": "images/baseline/components-planinfodrawer--community-upgrade-drawer.png",
+      "actualPath": "images/actual/components-planinfodrawer--community-upgrade-drawer.png",
+      "diffPath": "images/diff/components-planinfodrawer--community-upgrade-drawer.png",
+      "diffPixels": 6423,
+      "totalPixels": 1024000,
+      "diffRatio": 0.0062724609375,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 1280,
+        "height": 800
+      },
+      "actual": {
+        "width": 1280,
+        "height": 800
+      }
+    },
+    {
+      "fileName": "components-planinfodrawer--dark-community-upgrade-drawer--mobile.png",
+      "baselinePath": "images/baseline/components-planinfodrawer--dark-community-upgrade-drawer--mobile.png",
+      "actualPath": "images/actual/components-planinfodrawer--dark-community-upgrade-drawer--mobile.png",
+      "diffPath": "images/diff/components-planinfodrawer--dark-community-upgrade-drawer--mobile.png",
+      "diffPixels": 6659,
+      "totalPixels": 329160,
+      "diffRatio": 0.02023028314497509,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 390,
+        "height": 844
+      },
+      "actual": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "fileName": "components-planinfodrawer--dark-community-upgrade-drawer.png",
+      "baselinePath": "images/baseline/components-planinfodrawer--dark-community-upgrade-drawer.png",
+      "actualPath": "images/actual/components-planinfodrawer--dark-community-upgrade-drawer.png",
+      "diffPath": "images/diff/components-planinfodrawer--dark-community-upgrade-drawer.png",
+      "diffPixels": 6367,
+      "totalPixels": 1024000,
+      "diffRatio": 0.0062177734375,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 1280,
+        "height": 800
+      },
+      "actual": {
+        "width": 1280,
+        "height": 800
+      }
+    },
+    {
+      "fileName": "components-planinfodrawer--full-access-ending-soon-drawer--mobile.png",
+      "baselinePath": "images/baseline/components-planinfodrawer--full-access-ending-soon-drawer--mobile.png",
+      "actualPath": "images/actual/components-planinfodrawer--full-access-ending-soon-drawer--mobile.png",
+      "diffPath": "images/diff/components-planinfodrawer--full-access-ending-soon-drawer--mobile.png",
+      "diffPixels": 3573,
+      "totalPixels": 329160,
+      "diffRatio": 0.010854903390448414,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 390,
+        "height": 844
+      },
+      "actual": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "fileName": "components-planinfodrawer--full-access-ending-soon-drawer.png",
+      "baselinePath": "images/baseline/components-planinfodrawer--full-access-ending-soon-drawer.png",
+      "actualPath": "images/actual/components-planinfodrawer--full-access-ending-soon-drawer.png",
+      "diffPath": "images/diff/components-planinfodrawer--full-access-ending-soon-drawer.png",
+      "diffPixels": 3298,
+      "totalPixels": 1024000,
+      "diffRatio": 0.003220703125,
+      "dimensionsChanged": false,
+      "baseline": {
+        "width": 1280,
+        "height": 800
+      },
+      "actual": {
+        "width": 1280,
+        "height": 800
+      }
+    },
+    {
+      "fileName": "components-wizard-rclone-remote-dialog--create-managed-remote--mobile.png",
+      "baselinePath": "images/baseline/components-wizard-rclone-remote-dialog--create-managed-remote--mobile.png",
+      "actualPath": "images/actual/components-wizard-rclone-remote-dialog--create-managed-remote--mobile.png",
+      "diffPath": "images/diff/components-wizard-rclone-remote-dialog--create-managed-remote--mobile.png",
       "diffPixels": 362,
       "totalPixels": 329160,
       "diffRatio": 0.0010997691092477823,
@@ -93,9 +201,9 @@
       "baselinePath": "images/baseline/pages-cloudstorage--editing-remote.png",
       "actualPath": "images/actual/pages-cloudstorage--editing-remote.png",
       "diffPath": "images/diff/pages-cloudstorage--editing-remote.png",
-      "diffPixels": 1821,
+      "diffPixels": 2077,
       "totalPixels": 1024000,
-      "diffRatio": 0.0017783203125,
+      "diffRatio": 0.0020283203125,
       "dimensionsChanged": false,
       "baseline": {
         "width": 1280,
@@ -1830,28 +1938,10 @@
       "fileName": "components-plangate--with-preview.png"
     },
     {
-      "fileName": "components-planinfodrawer--community-upgrade-drawer--mobile.png"
-    },
-    {
-      "fileName": "components-planinfodrawer--community-upgrade-drawer.png"
-    },
-    {
-      "fileName": "components-planinfodrawer--dark-community-upgrade-drawer--mobile.png"
-    },
-    {
-      "fileName": "components-planinfodrawer--dark-community-upgrade-drawer.png"
-    },
-    {
       "fileName": "components-planinfodrawer--enterprise-plan-drawer--mobile.png"
     },
     {
       "fileName": "components-planinfodrawer--enterprise-plan-drawer.png"
-    },
-    {
-      "fileName": "components-planinfodrawer--full-access-ending-soon-drawer--mobile.png"
-    },
-    {
-      "fileName": "components-planinfodrawer--full-access-ending-soon-drawer.png"
     },
     {
       "fileName": "components-planinfodrawer--full-access-expired-drawer--mobile.png"
@@ -2604,10 +2694,10 @@
       "fileName": "components-wizard-rclone-remote-dialog--create-error.png"
     },
     {
-      "fileName": "components-wizard-rclone-remote-dialog--create-managed-remote--mobile.png"
+      "fileName": "components-wizard-rclone-remote-dialog--create-managed-remote.png"
     },
     {
-      "fileName": "components-wizard-rclone-remote-dialog--create-managed-remote.png"
+      "fileName": "components-wizard-rclone-remote-dialog--custom-backend-remote--mobile.png"
     },
     {
       "fileName": "components-wizard-rclone-remote-dialog--custom-backend-remote.png"
