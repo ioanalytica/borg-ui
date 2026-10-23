@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 import json
@@ -118,6 +119,12 @@ ARTIFACT_UPLOAD_CAPABILITY = "artifact.upload"
 AGENT_ARTIFACT_FIRST_BYTE_TIMEOUT = 60.0
 # Max gap between chunks before a stalled stream is abandoned.
 AGENT_ARTIFACT_IDLE_TIMEOUT = 60.0
+# How long taking a streamed download's job back waits for its cancel to be
+# sent to the agent; the send itself goes on.
+AGENT_CANCEL_SEND_TIMEOUT = 5.0
+# Strong references: the loop only holds weak ones, and a cancel send that
+# outlives its download must still reach the agent.
+_CANCEL_SEND_TASKS: set[asyncio.Task] = set()
 
 
 def _content_disposition_attachment(filename: str) -> str:
@@ -211,6 +218,29 @@ async def agent_file_download(
     )
 
 
+async def _take_back_streamed_agent_job(db: Session, agent_job_id: int) -> None:
+    """End a streamed download's agent job that nobody reads any more: an
+    unclaimed job is cancelled, a running one is asked to stop."""
+    abandoned = abandon_agent_repository_operation_job(db, agent_job_id)
+    agent_artifact_relay.unregister(agent_job_id)
+    if abandoned is not None and abandoned.status == "cancel_requested":
+        # Shielded: a download ended by its client's disconnect is being
+        # cancelled itself, and the agent must still hear of it. Bounded: a
+        # send queued behind a stalled one goes on without holding the answer.
+        send = asyncio.ensure_future(dispatch_agent_cancel_if_connected(abandoned))
+        _CANCEL_SEND_TASKS.add(send)
+        send.add_done_callback(_CANCEL_SEND_TASKS.discard)
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(send), timeout=AGENT_CANCEL_SEND_TIMEOUT
+            )
+        except TimeoutError:
+            logger.warning(
+                "Cancel of a streamed download's agent job still sending",
+                agent_job_id=agent_job_id,
+            )
+
+
 async def _stream_agent_archive_file(
     db: Session, repo: Repository, archive: str, file_path: str
 ) -> StreamingResponse:
@@ -234,6 +264,10 @@ async def _stream_agent_archive_file(
             archive=archive,
             file_path=file_path,
         )
+    except asyncio.CancelledError:
+        # the request ended while the job was being handed over
+        await _take_back_streamed_agent_job(db, agent_job.id)
+        raise
     except Exception:
         agent_artifact_relay.unregister(agent_job.id)
         raise
@@ -249,22 +283,36 @@ async def _stream_agent_archive_file(
         first_chunk = await stream.__anext__()
     except StopAsyncIteration:
         first_chunk = None  # empty file
+    except asyncio.CancelledError:
+        # the request itself ended (a shutdown, a dropped connection)
+        await _take_back_streamed_agent_job(db, agent_job.id)
+        raise
     except TimeoutError as exc:
+        await _take_back_streamed_agent_job(db, agent_job.id)
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={"key": "backend.errors.agents.repositoryOperationTimeout"},
         ) from exc
     except RuntimeError as exc:
+        await _take_back_streamed_agent_job(db, agent_job.id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=agent_operation_failed_detail(str(exc)),
         ) from exc
 
     async def body():
-        if first_chunk is not None:
-            yield first_chunk
-        async for chunk in stream:
-            yield chunk
+        delivered = False
+        try:
+            if first_chunk is not None:
+                yield first_chunk
+            async for chunk in stream:
+                yield chunk
+            delivered = True
+        finally:
+            # After the end of the stream the agent reports its completion;
+            # a cancel then would turn a delivered download into a failure.
+            if not delivered:
+                await _take_back_streamed_agent_job(db, agent_job.id)
 
     filename = os.path.basename(file_path) or "download"
     return StreamingResponse(
@@ -303,6 +351,10 @@ async def _stream_agent_archive_tar(
             archive=archive,
             directory_path=directory_path,
         )
+    except asyncio.CancelledError:
+        # the request ended while the job was being handed over
+        await _take_back_streamed_agent_job(db, agent_job.id)
+        raise
     except Exception:
         agent_artifact_relay.unregister(agent_job.id)
         raise
@@ -316,30 +368,36 @@ async def _stream_agent_archive_tar(
         first_chunk = await stream.__anext__()
     except StopAsyncIteration:
         first_chunk = None
+    except asyncio.CancelledError:
+        # the request itself ended (a shutdown, a dropped connection)
+        await _take_back_streamed_agent_job(db, agent_job.id)
+        raise
     except TimeoutError as exc:
-        abandon_agent_repository_operation_job(db, agent_job.id)
-        agent_artifact_relay.unregister(agent_job.id)
+        await _take_back_streamed_agent_job(db, agent_job.id)
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={"key": "backend.errors.agents.repositoryOperationTimeout"},
         ) from exc
     except RuntimeError as exc:
-        abandon_agent_repository_operation_job(db, agent_job.id)
-        agent_artifact_relay.unregister(agent_job.id)
+        await _take_back_streamed_agent_job(db, agent_job.id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=agent_operation_failed_detail(str(exc)),
         ) from exc
 
     async def body():
+        delivered = False
         try:
             if first_chunk is not None:
                 yield first_chunk
             async for chunk in stream:
                 yield chunk
+            delivered = True
         finally:
-            abandon_agent_repository_operation_job(db, agent_job.id)
-            agent_artifact_relay.unregister(agent_job.id)
+            # After the end of the stream the agent reports its completion;
+            # a cancel then would turn a delivered download into a failure.
+            if not delivered:
+                await _take_back_streamed_agent_job(db, agent_job.id)
 
     filename = f"{os.path.basename(directory_path.rstrip('/')) or 'archive'}.tar"
     return StreamingResponse(
