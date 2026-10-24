@@ -281,6 +281,10 @@ class OperationRunner:
         # process's own a caller could not cancel itself.
         self._abandoned_holds_pending = False
         self.holds_to_cancel: set[int] = set()
+        # When this runner took over (its recovery): a hold another process
+        # took before then is its predecessor's, one taken later a
+        # successor's, which is still live.
+        self._took_over_at: Optional[datetime] = None
 
     def _session(self) -> Session:
         """Open a session. Resolved lazily so test fixtures that patch
@@ -396,6 +400,7 @@ class OperationRunner:
         self.unrecorded_outcomes = {}
         # a recovery that fails before its sweep leaves it to the tick
         self._abandoned_holds_pending = True
+        self._took_over_at = None
         logger.info("Operations runner started", poll_interval=self._poll_interval)
         recovered = False
         try:
@@ -511,6 +516,7 @@ class OperationRunner:
         self._holds_lease = None
 
     def _recover(self, before_recovery: Optional[Callable[[], None]]) -> None:
+        self._took_over_at = utc_now()
         if before_recovery is not None:
             try:
                 before_recovery()
@@ -1151,6 +1157,8 @@ class OperationRunner:
             )
 
     def recover_on_startup(self, db: Session) -> dict:
+        if self._took_over_at is None:
+            self._took_over_at = utc_now()
         counts = {"requeued": 0, "failed": 0, "kept": 0}
         for op in db.query(Operation).filter(Operation.status == "running").all():
             if op.kind in INDEX_KINDS:
@@ -1202,16 +1210,21 @@ class OperationRunner:
     def _cancel_abandoned_holds(self, db: Session) -> int:
         """Cancel the queued operations held by another process, the one
         this start replaces: the caller that was to release them goes with
-        it, and they would run without what it was to do around them. One
-        this process holds (a schedule started while the runner waited for
-        the lease) stays, unless its caller handed it over
+        it, and they would run without what it was to do around them. A hold
+        another process took after this runner took over is a successor's
+        (one started while this runner still holds the lease) and stays, as
+        does one this process holds (a schedule started while the runner
+        waited for the lease), unless its caller handed it over
         (`cancel_held_later`)."""
         cancelled = 0
         for op in db.query(Operation).filter(Operation.status == "queued").all():
             holder = held_by(op)
-            if holder is None or (
-                holder == PROCESS_HOLD_ID and op.id not in self.holds_to_cancel
-            ):
+            if holder is None:
+                continue
+            if holder == PROCESS_HOLD_ID:
+                if op.id not in self.holds_to_cancel:
+                    continue
+            elif self._took_over_at is None or op.created_at >= self._took_over_at:
                 continue
             op.status = "cancelled"
             op.error_message = "\n".join(

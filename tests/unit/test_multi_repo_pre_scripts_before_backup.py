@@ -447,3 +447,25 @@ async def test_a_cancel_the_schedule_could_not_write_is_left_to_the_tick(
     assert test_db.get(Operation, job.id).status == "cancelled"
     assert runner.started == []
     assert not runner.holds_to_cancel
+
+
+@pytest.mark.asyncio
+async def test_a_retried_hold_sweep_leaves_a_successors_hold(test_db, runner):
+    # a replacement process holds a backup while this runner still has the
+    # lease and retries its sweep
+    repository = _repository(test_db)
+    with patch.object(
+        runner, "_cancel_abandoned_holds", side_effect=RuntimeError("locked")
+    ):
+        runner.recover_on_startup(test_db)
+    successor = create_backup_operation(
+        test_db, repository, trigger="schedule", executor="server", held=True
+    )
+    successor.operation.params = {**successor.operation.params, HOLD_PARAM: "next"}
+    test_db.commit()
+
+    await _tick(runner)
+
+    test_db.expire_all()
+    assert test_db.get(Operation, successor.id).status == "queued"
+    assert runner.started == []
