@@ -94,6 +94,19 @@ def deferred_until(op: Operation) -> Optional[float]:
     return value if math.isfinite(value) else None
 
 
+# A queued operation its caller is still preparing (a schedule's repository
+# pre-backup scripts, #1431) names the process holding it in its params. No
+# runner starts it until the caller releases it; one another process held
+# is cancelled when a start replaces that process.
+HOLD_PARAM = "held_by"
+PROCESS_HOLD_ID = uuid.uuid4().hex
+
+
+def held_by(op: Operation) -> Optional[str]:
+    """The process holding the queued operation, if any."""
+    return (op.params or {}).get(HOLD_PARAM)
+
+
 def deferral_count(op: Operation) -> int:
     """How often the operation has been deferred; unreadable bookkeeping
     counts as none rather than crashing the runner."""
@@ -263,6 +276,11 @@ class OperationRunner:
         # Outcomes of this runner's own tasks whose terminal commit failed,
         # by operation id; the tick writes them (`record_unrecorded_outcomes`).
         self.unrecorded_outcomes: dict[int, _UnrecordedOutcome] = {}
+        # Set until a cancel of abandoned holds succeeded: the tick tries
+        # again (`_sweep_abandoned_holds`). `holds_to_cancel` are this
+        # process's own a caller could not cancel itself.
+        self._abandoned_holds_pending = False
+        self.holds_to_cancel: set[int] = set()
 
     def _session(self) -> Session:
         """Open a session. Resolved lazily so test fixtures that patch
@@ -301,6 +319,12 @@ class OperationRunner:
         except RuntimeError:
             return
         self._event().set()
+
+    def cancel_held_later(self, operation_id: int) -> None:
+        """Cancel this process's held operation from the tick, for a caller
+        whose own cancel failed."""
+        self.holds_to_cancel.add(operation_id)
+        self._abandoned_holds_pending = True
 
     def stop(self) -> None:
         self._stopped = True
@@ -370,6 +394,8 @@ class OperationRunner:
         # Same reasoning: those rows belong to a previous lifetime's database
         # session, and `recover_on_startup` owns rows left running across one.
         self.unrecorded_outcomes = {}
+        # a recovery that fails before its sweep leaves it to the tick
+        self._abandoned_holds_pending = True
         logger.info("Operations runner started", poll_interval=self._poll_interval)
         recovered = False
         try:
@@ -772,6 +798,8 @@ class OperationRunner:
                 logger.warning(
                     "Sweep of abandoned index operations failed", error=str(exc)
                 )
+            if self._abandoned_holds_pending:
+                self._sweep_abandoned_holds(db)
             system_settings = db.query(SystemSettings).first()
             queued = (
                 db.query(Operation)
@@ -790,7 +818,7 @@ class OperationRunner:
                     # a stop during this tick's awaits; the drain after it
                     # waits only for what is already running
                     break
-                if op.id in self.running_tasks:
+                if op.id in self.running_tasks or held_by(op) is not None:
                     continue
                 not_before = deferred_until(op)
                 if not_before is not None and not_before > now:
@@ -1148,7 +1176,50 @@ class OperationRunner:
                     self._recover_repository_lock(db, op)
         db.commit()
         logger.info("Operations recovery completed", **counts)
+        # on its own: the recovery above does not depend on it
+        self._sweep_abandoned_holds(db)
         return counts
+
+    def _sweep_abandoned_holds(self, db: Session) -> None:
+        """`_cancel_abandoned_holds` and its commit; a failure leaves the
+        sweep to the next tick, so a held row does not outlive the database
+        error that kept it."""
+        try:
+            cancelled = self._cancel_abandoned_holds(db)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            self._abandoned_holds_pending = True
+            logger.warning(
+                "Cancelling operations a restart left held failed", error=str(exc)
+            )
+            return
+        self._abandoned_holds_pending = False
+        self.holds_to_cancel.clear()
+        if cancelled:
+            logger.warning("Cancelled operations a restart left held", count=cancelled)
+
+    def _cancel_abandoned_holds(self, db: Session) -> int:
+        """Cancel the queued operations held by another process, the one
+        this start replaces: the caller that was to release them goes with
+        it, and they would run without what it was to do around them. One
+        this process holds (a schedule started while the runner waited for
+        the lease) stays, unless its caller handed it over
+        (`cancel_held_later`)."""
+        cancelled = 0
+        for op in db.query(Operation).filter(Operation.status == "queued").all():
+            holder = held_by(op)
+            if holder is None or (
+                holder == PROCESS_HOLD_ID and op.id not in self.holds_to_cancel
+            ):
+                continue
+            op.status = "cancelled"
+            op.error_message = "\n".join(
+                filter(None, ["interrupted by restart", op.error_message])
+            )
+            op.completed_at = utc_now()
+            cancelled += 1
+        return cancelled
 
 
 operation_runner = OperationRunner()
