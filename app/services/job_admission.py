@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.database.models import (
     AgentJob,
+    BackupPlan,
     Operation,
     Repository,
     SystemSettings,
@@ -232,7 +233,11 @@ def _dialect_name(db: Session) -> str:
         return ""
 
 
-def _lock_repository_scope(db: Session, repository: Repository) -> None:
+def lock_repository_scope(db: Session, repository: Repository) -> None:
+    """Serialize a check for the repository's active work with the insert that
+    follows it in the transaction. A caller that refuses after the check rolls
+    back before it raises: the lock would otherwise stay until its session is
+    closed."""
     if repository.id is None:
         return
     if _dialect_name(db) == "sqlite":
@@ -244,6 +249,34 @@ def _lock_repository_scope(db: Session, repository: Repository) -> None:
     db.query(Repository).filter(
         Repository.id == repository.id
     ).with_for_update().first()
+
+
+def lock_backup_plan_scope(db: Session, backup_plan_id: int) -> None:
+    """Serialize a check for the plan's active run with the insert of a new
+    one in the transaction. Released like `lock_repository_scope`."""
+    if _dialect_name(db) == "sqlite":
+        db.execute(
+            text("UPDATE backup_plans SET id = id WHERE id = :backup_plan_id"),
+            {"backup_plan_id": backup_plan_id},
+        )
+        return
+    db.query(BackupPlan.id).filter(
+        BackupPlan.id == backup_plan_id
+    ).with_for_update().first()
+
+
+def lock_settings_row(db: Session, settings: SystemSettings) -> None:
+    """Hold the settings row until the transaction ends and read it again
+    under the lock: for a change that depends on what the row holds, and for
+    requests that agree on it as their turn."""
+    if _dialect_name(db) == "sqlite":
+        db.execute(
+            text("UPDATE system_settings SET id = id WHERE id = :settings_id"),
+            {"settings_id": settings.id},
+        )
+        db.refresh(settings)
+        return
+    db.refresh(settings, with_for_update=True)
 
 
 def lock_backup_capacity_scope(db: Session) -> None:
@@ -419,7 +452,7 @@ def ensure_repository_admission(
     to its next due job) would otherwise wait on, or hold, that lock for as
     long as the refused session lives.
     """
-    _lock_repository_scope(db, repository)
+    lock_repository_scope(db, repository)
     requested_class = operation_class_for(operation)
     active_work = list_active_repository_work(
         db,
