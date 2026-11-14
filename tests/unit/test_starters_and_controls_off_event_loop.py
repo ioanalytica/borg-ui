@@ -531,6 +531,35 @@ def test_of_two_reconcile_requests_at_once_one_queues_the_runs(
 
 
 @pytest.mark.unit
+def test_of_two_reconcile_requests_without_a_settings_row_one_queues_the_runs(
+    test_client, database, held_runner, admin, monkeypatch
+):
+    """An install that has saved no setting yet has no settings row, and
+    the two take their turn without one."""
+    _seed_repository(database)
+    with database() as db:
+        db.query(SystemSettings).delete()
+        db.commit()
+    gate = Gate()
+    _hold_before(monkeypatch, reconcile, "enqueue_chain", gate)
+
+    def request():
+        return test_client.post("/api/operations/reconcile", headers=admin)
+
+    first, second = _beside_the_held(gate, request, request)
+
+    assert first.status_code == second.status_code == 200
+    assert sorted([first.json()["repositories"], second.json()["repositories"]]) == [
+        0,
+        1,
+    ]
+    with database() as db:
+        run_ids = {run_id for (run_id,) in db.query(Operation.run_id)}
+        assert db.query(SystemSettings).count() == 0
+    assert len(run_ids) == 1
+
+
+@pytest.mark.unit
 def test_a_reconcile_request_beside_a_resync_queues_no_second_run(
     test_client, database, held_runner, admin, monkeypatch
 ):

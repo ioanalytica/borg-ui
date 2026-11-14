@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.database.database import SessionLocal, checkout_can_wait, run_off_loop
 from app.database.models import Operation, Repository, SystemSettings, utc_now
-from app.services.job_admission import lock_settings_row
+from app.services.job_admission import lock_reconcile_scope
 from app.services.operations.enqueue import enqueue_chain
 from app.services.operations.executors import registered_kinds
 from app.services.operations.followups import (
@@ -165,16 +165,6 @@ def enqueue_reconcile_run(
         priority=PRIORITY_RECONCILE,
         commit=commit,
     )
-
-
-def lock_reconcile_scope(db: Session) -> None:
-    """One caller queues reconcile runs at a time, from here to its commit:
-    the next one finds the runs it queued. The in-flight check of
-    `enqueue_reconcile_run` and its insert are two steps, and two callers,
-    a request in a worker thread among them, would both pass the check."""
-    settings = db.query(SystemSettings).first()
-    if settings is not None:
-        lock_settings_row(db, settings)
 
 
 def enqueue_reconcile_runs(db: Session) -> int:

@@ -296,6 +296,24 @@ def lock_backup_capacity_scope(db: Session) -> None:
     db.query(SystemSettings).order_by(SystemSettings.id.asc()).with_for_update().first()
 
 
+def lock_reconcile_scope(db: Session) -> None:
+    """One caller queues reconcile runs at a time, from here to the end of
+    its transaction: the next one finds the runs it queued. The in-flight
+    check of `enqueue_reconcile_run` and its insert are two steps, and two
+    callers, a request in a worker thread among them, would both pass the
+    check. Not held on the settings row: an install that has saved no
+    setting yet has none, and the reconcile scheduler does not create it."""
+    dialect_name = _dialect_name(db)
+    if dialect_name == "sqlite":
+        # The database's one write lock, whether or not a row matches.
+        db.execute(text("UPDATE system_settings SET id = id"))
+        return
+    if dialect_name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": 276117})
+        return
+    db.query(SystemSettings).order_by(SystemSettings.id.asc()).with_for_update().first()
+
+
 def _active_work(
     repository: Repository,
     operation: str,
