@@ -1386,31 +1386,40 @@ def test_a_session_ending_on_a_failed_start_read_marks_the_agent_offline(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_registering_does_not_wait_for_a_replaced_session_that_hangs(
-    monkeypatch,
-):
+async def test_registering_does_not_wait_for_a_replaced_session_that_hangs():
     """The new session registers under the agent's lock; a replaced client
-    that stopped reading must not keep it there."""
-    from app.services import agent_connection_manager as manager_module
+    that stopped reading must not keep it there. The old session is still
+    closed, once its client reads again."""
     from app.services.agent_connection_manager import (
         AgentConnection,
         AgentConnectionManager,
     )
 
-    class HangingClose(_FakeWebSocket):
-        async def close(self, code: int = 1000, reason: str = "") -> None:
-            await asyncio.Event().wait()
+    class GatedClose(_FakeWebSocket):
+        def __init__(self, hello: dict) -> None:
+            super().__init__(hello)
+            self.reading = asyncio.Event()
+            self.closed_with = asyncio.Event()
 
-    monkeypatch.setattr(manager_module, "REPLACED_SESSION_CLOSE_TIMEOUT_SECONDS", 0.01)
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            await self.reading.wait()
+            self.closed = code
+            self.closed_with.set()
+
     manager = AgentConnectionManager()
-    old = AgentConnection(
-        agent_machine_id=7, agent_id=AGENT_ID, websocket=HangingClose(_hello())
-    )
+    old_socket = GatedClose(_hello())
+    old = AgentConnection(agent_machine_id=7, agent_id=AGENT_ID, websocket=old_socket)
     new = AgentConnection(
         agent_machine_id=7, agent_id=AGENT_ID, websocket=_FakeWebSocket(_hello())
     )
     await manager.register(old)
 
     await asyncio.wait_for(manager.register(new), HOLD_SECONDS)
+    registered_before_the_close = old_socket.closed is None
 
+    old_socket.reading.set()
+    await asyncio.wait_for(old_socket.closed_with.wait(), HOLD_SECONDS)
+
+    assert registered_before_the_close
     assert manager.get(7) is new
+    assert old_socket.closed == 1012
