@@ -1236,22 +1236,21 @@ def test_a_replaced_session_leaves_its_successor_online(
             return agent_connection_manager.is_connected(agent_id)
 
     try:
-        with contextlib.suppress(WebSocketDisconnect):
-            with _connected(test_client) as first:
-                with _connected(test_client):
-                    # The new session got its ack while the old close is held.
-                    assert close_started.wait(HOLD_SECONDS)
-                    ack_while_held = not old_closed.is_set()
-                    old_client_reads.set()
-                    # The server closes the old session ...
-                    with pytest.raises(WebSocketDisconnect) as replaced:
-                        _receive(first)
-                    # ... and its client goes too.
-                    with contextlib.suppress(Exception):
-                        first.close()
-                    assert first_gone.wait(HOLD_SECONDS)
-                    connected = test_client.portal.call(after_the_old_sessions_end)
-                    status_meanwhile = _row(database, AgentMachine, agent_id).status
+        with _connected(test_client) as first:
+            with _connected(test_client):
+                # The new session got its ack while the old close is held.
+                assert close_started.wait(HOLD_SECONDS)
+                ack_while_held = not old_closed.is_set()
+                old_client_reads.set()
+                # The server closes the old session ...
+                with pytest.raises(WebSocketDisconnect) as replaced:
+                    _receive(first)
+                # ... and its client goes too.
+                with contextlib.suppress(Exception):
+                    first.close()
+                assert first_gone.wait(HOLD_SECONDS)
+                connected = test_client.portal.call(after_the_old_sessions_end)
+                status_meanwhile = _row(database, AgentMachine, agent_id).status
     finally:
         old_client_reads.set()
 
