@@ -1199,10 +1199,23 @@ async def test_a_session_cancelled_after_its_hello_leaves_the_agent_offline(
 def test_a_replaced_session_leaves_its_successor_online(
     test_client, database, monkeypatch
 ):
-    """A new session of the agent closes the old one; the old one's end must
-    not mark the agent offline under the new one."""
+    """A new session of the agent closes the old one. The new one does not
+    wait for that close (its client may have stopped reading), and the old
+    one's end must not mark the agent offline under the new one."""
+    from app.services import agent_connection_manager as manager_module
+
     agent_id = _seed_agent(database, status="offline")
     first_gone = threading.Event()
+    old_client_reads = threading.Event()
+    old_closed = threading.Event()
+    original_close = manager_module._close_replaced
+
+    async def held_close(connection):
+        await asyncio.to_thread(old_client_reads.wait, HOLD_SECONDS)
+        await original_close(connection)
+        old_closed.set()
+
+    monkeypatch.setattr(manager_module, "_close_replaced", held_close)
     original_disconnect = agent_connection_manager.disconnect
     sessions_seen = []
 
@@ -1222,12 +1235,16 @@ def test_a_replaced_session_leaves_its_successor_online(
     with contextlib.suppress(WebSocketDisconnect):
         with _connected(test_client) as first:
             with _connected(test_client):
+                # The new session got its ack while the old close is held.
+                ack_while_held = not old_closed.is_set()
+                old_client_reads.set()
                 # The server closed the old session; its client goes too.
                 first.close()
                 assert first_gone.wait(HOLD_SECONDS)
                 connected = test_client.portal.call(after_the_old_sessions_end)
                 status_meanwhile = _row(database, AgentMachine, agent_id).status
 
+    assert ack_while_held
     assert sessions_seen[0] is False
     assert connected
     assert status_meanwhile == "online"
