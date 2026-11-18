@@ -9,6 +9,11 @@ from uuid import uuid4
 
 from fastapi import WebSocket
 
+# How long registering a new session waits for the session it replaces to
+# close. A client that stopped reading can keep a close waiting; the new
+# session must not wait with it.
+REPLACED_SESSION_CLOSE_TIMEOUT_SECONDS = 5.0
+
 
 class AgentConnectionUnavailable(RuntimeError):
     pass
@@ -138,7 +143,10 @@ class AgentConnectionManager:
         if previous is not None and previous is not connection:
             previous.reject_pending("Agent session was replaced by a new connection")
             try:
-                await previous.websocket.close(code=1012)
+                await asyncio.wait_for(
+                    previous.websocket.close(code=1012),
+                    timeout=REPLACED_SESSION_CLOSE_TIMEOUT_SECONDS,
+                )
             except Exception:
                 pass
         self.append_log(

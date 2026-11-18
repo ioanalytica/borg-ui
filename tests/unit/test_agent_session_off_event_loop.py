@@ -1353,3 +1353,64 @@ async def test_a_failed_message_gives_up_its_locks_before_the_agents_lock(
         other.exec_driver_sql("ROLLBACK")
     finally:
         other.close()
+
+
+@pytest.mark.unit
+def test_a_session_ending_on_a_failed_start_read_marks_the_agent_offline(
+    test_client, database, monkeypatch
+):
+    """A read that fails ends no transaction of its own; the offline mark at
+    the session's end starts from a clean one. PostgreSQL aborts the
+    transaction on the error; SQLite does not fail the statement."""
+    if database.kw["bind"].dialect.name != "postgresql":
+        pytest.skip("SQLite answers 1/0 with NULL")
+    agent_id = _seed_agent(database, status="offline")
+
+    def failing_read(db, agent_machine_id, running_job_ids):
+        db.execute(text("SELECT 1/0"))
+
+    monkeypatch.setattr(agents, "_cancel_requested_running_jobs", failing_read)
+
+    with pytest.raises(DBAPIError):
+        with test_client.websocket_connect(
+            "/api/agents/session",
+            headers={"X-Borg-Agent-Authorization": f"Bearer {RAW_TOKEN}"},
+        ) as websocket:
+            websocket.send_json(_hello())
+            assert _receive(websocket)["type"] == "hello_ack"
+            _receive(websocket)
+
+    assert _row(database, AgentMachine, agent_id).status == "offline"
+    assert not agent_connection_manager.is_connected(agent_id)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_registering_does_not_wait_for_a_replaced_session_that_hangs(
+    monkeypatch,
+):
+    """The new session registers under the agent's lock; a replaced client
+    that stopped reading must not keep it there."""
+    from app.services import agent_connection_manager as manager_module
+    from app.services.agent_connection_manager import (
+        AgentConnection,
+        AgentConnectionManager,
+    )
+
+    class HangingClose(_FakeWebSocket):
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager_module, "REPLACED_SESSION_CLOSE_TIMEOUT_SECONDS", 0.01)
+    manager = AgentConnectionManager()
+    old = AgentConnection(
+        agent_machine_id=7, agent_id=AGENT_ID, websocket=HangingClose(_hello())
+    )
+    new = AgentConnection(
+        agent_machine_id=7, agent_id=AGENT_ID, websocket=_FakeWebSocket(_hello())
+    )
+    await manager.register(old)
+
+    await asyncio.wait_for(manager.register(new), HOLD_SECONDS)
+
+    assert manager.get(7) is new

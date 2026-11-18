@@ -2374,6 +2374,9 @@ def _jobs_owed_at_hello(
 
 @_ends_its_transaction_on_error
 def _mark_session_agent_offline(db: Session, agent_machine_id: int) -> None:
+    # The session may end on a failed read (one that ended no transaction of
+    # its own): start from a clean one.
+    db.rollback()
     # Guarded: a revocation committed meanwhile stays
     db.query(AgentMachine).filter(
         AgentMachine.id == agent_machine_id,
