@@ -242,7 +242,12 @@ async def _the_loop_runs_while(waiting, release) -> None:
     takes a turn while it waits: `release`, which gives it back, runs only
     after a while, from a thread."""
     released = threading.Event()
+    timer_fired = threading.Event()
     given_back = threading.Lock()
+
+    def on_time() -> None:
+        timer_fired.set()
+        give_back()
 
     def give_back() -> None:
         with given_back:  # once, from the timer or from the cleanup below
@@ -251,14 +256,15 @@ async def _the_loop_runs_while(waiting, release) -> None:
             released.set()
             release()
 
-    timer = threading.Timer(HOLD_SECONDS / 2, give_back)
+    timer = threading.Timer(HOLD_SECONDS / 2, on_time)
     timer.start()
     task = asyncio.ensure_future(waiting)
     try:
         await asyncio.sleep(0.05)
         assert not released.is_set(), "the pass waited on the loop"
         await asyncio.wait_for(task, HOLD_SECONDS * 4)
-        finished_on_its_own = not timer.is_alive() and released.is_set()
+        # the pass ended only once the timer had given back what it waited for
+        finished_on_its_own = timer_fired.is_set()
     finally:
         timer.cancel()
         held_back = not released.is_set()
@@ -1094,6 +1100,22 @@ async def test_a_plan_moved_while_its_source_is_probed_keeps_its_new_time(
         assert session.get(BackupPlan, plan_id).next_run == later
 
 
+def _both_passes_read_first(monkeypatch) -> None:
+    """Each pass waits, before it screens its first job, until the other one
+    has read the due jobs too: both start from the same state."""
+    both_read = threading.Barrier(2, timeout=HOLD_SECONDS)
+    passes_waited: set[int] = set()
+    real = schedule_api._screen_due_job
+
+    def screen(db, job_id, now, notices):
+        if id(db) not in passes_waited:
+            passes_waited.add(id(db))
+            both_read.wait()
+        return real(db, job_id, now, notices)
+
+    monkeypatch.setattr(schedule_api, "_screen_due_job", screen)
+
+
 @pytest.mark.unit
 async def test_two_passes_at_once_dispatch_a_schedule_once(
     database, launches, monkeypatch
@@ -1134,16 +1156,18 @@ async def test_two_passes_at_once_dispatch_a_schedule_once(
         return real(db, job, now, launches)
 
     monkeypatch.setattr(schedule_api, "_dispatch_due_scheduled_job", held_first)
+    _both_passes_read_first(monkeypatch)
     now = datetime.utcnow()
     with database() as one, database() as two:
+        # both read the due jobs; the first dispatch is then held while the
+        # other pass gets as far as it can
         first = asyncio.ensure_future(
             schedule_api.dispatch_due_scheduled_backups(one, now)
         )
-        assert await asyncio.to_thread(first_held.wait, HOLD_SECONDS)
         second = asyncio.ensure_future(
             schedule_api.dispatch_due_scheduled_backups(two, now)
         )
-        # the second pass gets as far as it can while the first is held
+        assert await asyncio.to_thread(first_held.wait, HOLD_SECONDS)
         await asyncio.sleep(0.5)
         go_on.set()
         await asyncio.wait_for(asyncio.gather(first, second), HOLD_SECONDS * 4)
@@ -1433,16 +1457,19 @@ async def test_two_passes_at_once_keep_to_the_scheduled_backup_limit(
         return real(db, job, now, launches)
 
     monkeypatch.setattr(schedule_api, "_dispatch_due_scheduled_job", held_first)
+    _both_passes_read_first(monkeypatch)
     now = datetime.utcnow()
     with database() as one, database() as two:
+        # both read the due jobs; the first dispatch is then held while the
+        # other pass gets as far as it can
         first = asyncio.ensure_future(
             schedule_api.dispatch_due_scheduled_backups(one, now)
         )
-        assert await asyncio.to_thread(first_held.wait, HOLD_SECONDS)
         second = asyncio.ensure_future(
             schedule_api.dispatch_due_scheduled_backups(two, now)
         )
-        await asyncio.sleep(0.5)  # the second pass gets as far as it can
+        assert await asyncio.to_thread(first_held.wait, HOLD_SECONDS)
+        await asyncio.sleep(0.5)
         go_on.set()
         await asyncio.wait_for(asyncio.gather(first, second), HOLD_SECONDS * 4)
         await asyncio.sleep(0)

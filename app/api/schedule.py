@@ -3011,6 +3011,9 @@ def _screen_due_job(
     """What happens to the due job: `skipped` (recorded here), `dispatch`, or
     `probe` with the repositories whose sources have to be available first.
     `gone` for a job that is no longer due."""
+    # Asked before the claim: on an install with no licensing row yet, the
+    # first look creates it and commits, which would end the claim.
+    has_feature(db, BORG2_FEATURE)
     job = _claim_due_job(db, job_id, now)
     if job is None:
         return "gone", None
