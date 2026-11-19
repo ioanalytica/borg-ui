@@ -1558,3 +1558,57 @@ async def test_a_skip_is_written_under_the_jobs_lock(database, monkeypatch):
 
     assert edits == ["waited"]
     assert _skip_reasons(database) == ["source_unavailable"]
+
+
+@pytest.mark.unit
+async def test_a_plan_required_skip_is_written_under_the_jobs_lock_on_a_new_install(
+    database, monkeypatch
+):
+    """No licensing row yet: the first feature lookup creates it and
+    commits. That happens before the claim, so the skip of a Borg 2 schedule
+    is still written under the job's lock: an edit meanwhile waits."""
+    _settings(database)
+    [repository_id] = _seed(database, _repository("borg-2", borg_version=2))
+    [job_id] = _seed(
+        database,
+        ScheduledJob(
+            name="borg 2 schedule",
+            cron_expression="0 2 * * *",
+            enabled=True,
+            repository_id=repository_id,
+            next_run=datetime.utcnow() - PAST,
+        ),
+    )
+    edits: list[str] = []
+    real = schedule_api._record_availability_skip
+
+    def edit_beside() -> str:
+        with database.side.connect() as connection:
+            try:
+                if database.kind == "postgresql":
+                    connection.execute(text("SET lock_timeout = '1s'"))
+                connection.execute(
+                    text("UPDATE scheduled_jobs SET next_run = :t WHERE id = :id"),
+                    {"id": job_id, "t": datetime(2999, 1, 1)},
+                )
+                connection.commit()
+                return "edited"
+            except OperationalError:
+                return "waited"
+
+    def record_skip(*args, **kwargs):
+        edits.append(edit_beside())
+        return real(*args, **kwargs)
+
+    async def notify(*args, **kwargs) -> None:
+        pass
+
+    monkeypatch.setattr(schedule_api, "_record_availability_skip", record_skip)
+    monkeypatch.setattr(schedule_api, "_send_schedule_failure", notify)
+    with database() as session:
+        assert session.query(LicensingState).count() == 0
+
+    await _one_pass(monkeypatch)
+
+    assert edits == ["waited"]
+    assert _skip_reasons(database) == ["plan_required"]
